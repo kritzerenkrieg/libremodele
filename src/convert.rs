@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::math::{M3, V3, Xf, cross, dot, len, mul, norm, sub};
 use crate::mdl::{Bodypart, Bone, Hitbox, Mesh, Model, SubModel, Texture};
-use crate::preview::{bone_worlds, winding_sign};
+use crate::preview::{MASKED, bone_worlds, winding_sign};
 use crate::texture;
 use crate::vrm::Avatar;
 
@@ -89,6 +89,8 @@ pub struct Options {
     pub height: Option<f32>,
     /// Clean-manifest overrides: part id → keep (B4).
     pub keep: HashMap<String, bool>,
+    /// Triangle budget for lossy reduction (C4, C8); default Sven's guidance.
+    pub max_tris: Option<usize>,
 }
 
 pub struct Converted {
@@ -409,6 +411,43 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
         .into_iter()
         .filter(|n| !node_bone.contains_key(n))
         .collect();
+    // Bone budget (D2, A11): merge the deepest chain links first, evenly
+    // across chains, until the skeleton fits. A merged link's vertices go to
+    // the nearest kept ancestor; roots and upper links stay, for sway (D15).
+    let room = MAX_BONES.saturating_sub(bones.len());
+    if extras.len() > room {
+        let link = |mut n: usize| {
+            let mut d = 0;
+            while let Some(p) = av.nodes[n].parent.filter(|p| av.spring.contains(p)) {
+                n = p;
+                d += 1;
+            }
+            d
+        };
+        let mut carry: HashMap<usize, usize> = HashMap::new();
+        for &i in &kept {
+            for &d in &av.parts[i].dominant {
+                *carry.entry(d).or_default() += 1;
+            }
+        }
+        // Deepest first; among equals, the link carrying the fewest vertices.
+        extras.sort_by_key(|&n| {
+            (
+                std::cmp::Reverse(link(n)),
+                carry.get(&n).copied().unwrap_or(0),
+                n,
+            )
+        });
+        let merged = extras.len() - room;
+        let names: Vec<String> = extras[..merged]
+            .iter()
+            .map(|&n| av.nodes[n].name.clone())
+            .collect();
+        extras.drain(..merged);
+        report.push(format!(
+            "bone budget (D2): merged {merged} chain links into their parents to fit {MAX_BONES} bones: {names:?}"
+        ));
+    }
     extras.sort_by_key(|&n| (depth(n), n));
     for &e in &extras {
         let parent = av.nodes[e]
@@ -461,6 +500,22 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
         .collect();
     let mut rig = crate::sway::Rig {
         units_per_metre: s,
+        tails: extras
+            .iter()
+            .filter_map(|&e| {
+                let b = node_bone[&e];
+                let child = (0..av.nodes.len())
+                    .filter(|&c| av.nodes[c].parent == Some(e) && av.spring.contains(&c))
+                    .min()?;
+                if node_bone.contains_key(&child) {
+                    return None;
+                }
+                let tail = lfr[b]?
+                    .inverse_rigid()
+                    .apply(to_gs(av.nodes[child].world.t));
+                (len(tail) > 1e-3).then_some((b, tail))
+            })
+            .collect(),
         chains: extras
             .iter()
             .filter_map(|&e| strand.get(&node_bone[&e]).map(|&(g, _)| (node_bone[&e], g)))
@@ -507,38 +562,61 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
             .collect::<Vec<_>>()
     ));
 
-    // Texture (C5, C6, D6, D10): one shared base-colour image.
-    let images: HashSet<Option<usize>> = kept.iter().map(|&i| av.parts[i].image).collect();
-    if images.len() != 1 {
-        bail!(
-            "the kept parts use {} different textures; atlasing is not implemented yet (C5)",
-            images.len()
-        );
+    // Textures (C5, C6, D6, D10): one GoldSrc texture per (image, masked)
+    // pair, so a texture shared by opaque and cutout materials appears twice.
+    let mut tex_keys: Vec<(usize, bool)> = Vec::new();
+    let mut part_tex: HashMap<usize, usize> = HashMap::new();
+    for &i in &kept {
+        let p = &av.parts[i];
+        let image = p
+            .image
+            .ok_or_else(|| anyhow!("{}: no base colour texture", p.id))?;
+        let k = (image, p.masked);
+        let ti = match tex_keys.iter().position(|x| *x == k) {
+            Some(ti) => ti,
+            None => {
+                tex_keys.push(k);
+                tex_keys.len() - 1
+            }
+        };
+        part_tex.insert(i, ti);
     }
-    let image = images
-        .into_iter()
-        .next()
-        .unwrap()
-        .ok_or_else(|| anyhow!("the avatar has no base colour texture"))?;
-    let tex = texture::goldsrc_texture(&av.images[image], MAX_TEXTURE)?;
     let unlit = kept.iter().all(|&i| av.parts[i].unlit);
-    let (tw, th) = (tex.width as f32, tex.height as f32);
-    report.push(format!(
-        "texture: {}x{}, {} colours, flags {}",
-        tex.width,
-        tex.height,
-        tex.palette.len(),
-        if unlit { "flatshade (D10)" } else { "none" }
-    ));
+    let mut textures = Vec::new();
+    for (ti, &(image, masked)) in tex_keys.iter().enumerate() {
+        let tex = texture::goldsrc_texture_masked(&av.images[image], MAX_TEXTURE, masked)?;
+        let flags = if unlit { FLATSHADE } else { 0 } | if masked { MASKED } else { 0 };
+        report.push(format!(
+            "texture {ti}: image {image}, {}x{}, flags {}{}",
+            tex.width,
+            tex.height,
+            if unlit { "flatshade (D10)" } else { "none" },
+            if masked { " + masked (C5, D6)" } else { "" }
+        ));
+        let name = if tex_keys.len() == 1 {
+            format!("{}.bmp", o.name)
+        } else {
+            format!("{}_{ti}.bmp", o.name)
+        };
+        textures.push(Texture {
+            name,
+            flags,
+            width: tex.width as i32,
+            height: tex.height as i32,
+            palette: tex.palette_bytes(),
+            pixels: tex.pixels,
+        });
+    }
 
-    // Triangles with rigid bone binding (D3) in bone-local space.
+    // Triangles with rigid bone binding (D3), in model space until reduced.
     let flip = winding_sign(donor) < 0.0;
-    use crate::reduce::Vtx as Corner;
+    use crate::decimate::Vtx as Corner;
     let mut tris: Vec<[Corner; 3]> = Vec::new();
     let mut degenerate = 0;
-    let mut bone_hits = vec![0usize; bones.len()];
     for &pi in &kept {
         let part = &av.parts[pi];
+        let ti = part_tex[&pi];
+        let (tw, th) = (textures[ti].width as f32, textures[ti].height as f32);
         for t in &part.triangles {
             let mut idx = t.map(|v| v as usize);
             if idx.iter().any(|&v| v >= part.positions.len()) {
@@ -552,27 +630,81 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
             if flip {
                 idx.swap(1, 2);
             }
-            let corner = |v: usize| {
-                let bone = resolve_in(part.dominant[v], &node_bone);
-                let fr = lfr[bone].expect("bones that carry vertices have frames");
-                let st = [
+            let corner = |v: usize| Corner {
+                bone: resolve_in(part.dominant[v], &node_bone),
+                tex: ti,
+                p: to_gs(part.positions[v]),
+                n: norm(c.apply(part.normals[v])),
+                st: [
                     (part.uvs[v][0] * tw).round().clamp(-32768.0, 32767.0) as i16,
                     (part.uvs[v][1] * th).round().clamp(-32768.0, 32767.0) as i16,
-                ];
-                Corner {
-                    bone,
-                    p: fr.inverse_rigid().apply(to_gs(part.positions[v])),
-                    n: norm(fr.r.transpose().apply(c.apply(part.normals[v]))),
-                    st,
-                }
+                ],
             };
-            let tri = [corner(idx[0]), corner(idx[1]), corner(idx[2])];
-            for k in &tri {
-                bone_hits[k.bone] += 1;
-            }
-            tris.push(tri);
+            tris.push([corner(idx[0]), corner(idx[1]), corner(idx[2])]);
         }
     }
+
+    // Lossless edge collapse per texture (C1, C2, C3).
+    let before_reduce = tris.len();
+    let mut lossless = Vec::new();
+    let mut kept_by: HashMap<crate::reduce::Block, usize> = HashMap::new();
+    for ti in 0..textures.len() {
+        let group: Vec<[crate::reduce::Vtx; 3]> = tris
+            .iter()
+            .filter(|t| t[0].tex == ti)
+            .map(|t| {
+                t.map(|c| crate::reduce::Vtx {
+                    bone: c.bone,
+                    p: c.p,
+                    n: c.n,
+                    st: c.st,
+                })
+            })
+            .collect();
+        let (r, kb) = crate::reduce::reduce_with_stats(&group);
+        for (b, n) in kb {
+            *kept_by.entry(b).or_default() += n;
+        }
+        lossless.extend(r.into_iter().map(|t| {
+            t.map(|v| Corner {
+                bone: v.bone,
+                tex: ti,
+                p: v.p,
+                n: v.n,
+                st: v.st,
+            })
+        }));
+    }
+    let mut kept_by: Vec<_> = kept_by.into_iter().collect();
+    kept_by.sort();
+    report.push(format!(
+        "edge collapse: vertices kept by rule {kept_by:?} (C3)"
+    ));
+
+    // Lossy decimation to the budget (C4, C8), only when over it.
+    let budget = o.max_tris.unwrap_or(SVEN_POLY_GUIDE).min(MAX_TRIS);
+    let after_lossless = lossless.len();
+    let (mut tris, dst) = crate::decimate::decimate(&lossless, budget);
+    if after_lossless > budget {
+        report.push(format!(
+            "decimation (C8): {after_lossless} → {} triangles for a budget of {budget}; lock stage {} (0 all locked, 1 bone boundaries free, 2 seams and borders slide), {} collapses, max error {:.2} units{}",
+            tris.len(),
+            dst.stage,
+            dst.collapses,
+            dst.max_error,
+            if dst.reached { "" } else { "; budget not reached" }
+        ));
+    }
+    if tris.len() > MAX_TRIS {
+        bail!("{} triangles, over the {MAX_TRIS} limit", tris.len());
+    }
+    if tris.len() > SVEN_POLY_GUIDE {
+        report.push(format!(
+            "warning: {} triangles, over Sven's ~{SVEN_POLY_GUIDE} playermodel guidance (A11)",
+            tris.len()
+        ));
+    }
+
     // Sway only strands that are separate meshes: a triangle joining two
     // strands (a skirt's panels, a back-hair sheet) would tear open under
     // rigid binding (D3) as they swing apart, so those strands stay static.
@@ -594,46 +726,54 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
         .map(|&(_, root)| av.nodes[root].name.as_str())
         .collect();
     joined.sort();
+    joined.dedup();
     report.push(format!(
         "sway rig: {} chain bones can sway; strands kept static because they share triangles with another strand: {joined:?} (D15)",
         rig.chains.len()
     ));
 
-    // Lossless edge collapse (C1, C2, C3).
-    let before_reduce = tris.len();
-    let (mut tris, kept_by) = crate::reduce::reduce_with_stats(&tris);
-    report.push(format!(
-        "edge collapse: vertices kept by rule {kept_by:?} (C3)"
-    ));
+    // Into each bone's frame.
+    let mut bone_hits = vec![0usize; bones.len()];
+    for t in &mut tris {
+        for k in t.iter_mut() {
+            let fr = lfr[k.bone].expect("bones that carry vertices have frames");
+            k.p = fr.inverse_rigid().apply(k.p);
+            k.n = norm(fr.r.transpose().apply(k.n));
+            bone_hits[k.bone] += 1;
+        }
+    }
     tris.sort_by_key(|t| t[0].bone);
-    if tris.len() > MAX_TRIS {
-        bail!("{} triangles, over the {MAX_TRIS} limit", tris.len());
-    }
-    if tris.len() > SVEN_POLY_GUIDE {
-        report.push(format!(
-            "warning: {} triangles, over Sven's ~{SVEN_POLY_GUIDE} playermodel guidance (A11)",
-            tris.len()
-        ));
-    }
 
-    // Weld (C2) and fill bodyparts up to the vertex limit (D5).
+    // Weld (C2) and fill bodyparts up to the vertex limits (D5). Each texture
+    // is its own mesh, and GoldSrc lights normals mesh by mesh in file order,
+    // so every mesh keeps its own run of normals.
     type Key = (usize, [i32; 3]);
     #[derive(Default)]
-    struct Part {
-        verts: Vec<V3>,
-        vert_bones: Vec<u8>,
-        vmap: HashMap<Key, i16>,
+    struct MeshB {
         norms: Vec<V3>,
         norm_bones: Vec<u8>,
         nmap: HashMap<Key, i16>,
         tris: Vec<[[i16; 4]; 3]>,
     }
+    struct Part {
+        verts: Vec<V3>,
+        vert_bones: Vec<u8>,
+        vmap: HashMap<Key, i16>,
+        meshes: Vec<MeshB>,
+    }
+    let new_part = || Part {
+        verts: Vec::new(),
+        vert_bones: Vec::new(),
+        vmap: HashMap::new(),
+        meshes: (0..textures.len()).map(|_| MeshB::default()).collect(),
+    };
     // D12: flatshade ignores most of the normal, so weld normals within ~1°.
     let nq = if unlit { 57.3 } else { 1e3 };
     let qkey = |b: usize, v: V3, s: f32| (b, v.map(|x| (x * s).round() as i32));
-    let mut parts: Vec<Part> = vec![Part::default()];
+    let mut parts: Vec<Part> = vec![new_part()];
     let mut welded_degenerate = 0;
     for t in &tris {
+        let ti = t[0].tex;
         let cur = parts.last().unwrap();
         let new_v = t
             .iter()
@@ -641,13 +781,14 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
             .count();
         let new_n = t
             .iter()
-            .filter(|k| !cur.nmap.contains_key(&qkey(k.bone, k.n, nq)))
+            .filter(|k| !cur.meshes[ti].nmap.contains_key(&qkey(k.bone, k.n, nq)))
             .count();
+        let norms: usize = cur.meshes.iter().map(|m| m.norms.len()).sum();
         if cur.verts.len() + new_v > MAX_VERTS
-            || cur.norms.len() + new_n > MAX_VERTS
-            || cur.tris.len() + 1 > MAX_TRIS_PER_MESH
+            || norms + new_n > MAX_VERTS
+            || cur.meshes[ti].tris.len() + 1 > MAX_TRIS_PER_MESH
         {
-            parts.push(Part::default());
+            parts.push(new_part());
         }
         let cur = parts.last_mut().unwrap();
         let mut cmd = Vec::with_capacity(3);
@@ -663,14 +804,15 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
                     i
                 }
             };
+            let mesh = &mut cur.meshes[ti];
             let nk = qkey(k.bone, k.n, nq);
-            let ni = match cur.nmap.get(&nk) {
+            let ni = match mesh.nmap.get(&nk) {
                 Some(&i) => i,
                 None => {
-                    let i = cur.norms.len() as i16;
-                    cur.norms.push(k.n);
-                    cur.norm_bones.push(k.bone as u8);
-                    cur.nmap.insert(nk, i);
+                    let i = mesh.norms.len() as i16;
+                    mesh.norms.push(k.n);
+                    mesh.norm_bones.push(k.bone as u8);
+                    mesh.nmap.insert(nk, i);
                     i
                 }
             };
@@ -680,13 +822,16 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
             welded_degenerate += 1;
             continue;
         }
-        cur.tris.push([cmd[0], cmd[1], cmd[2]]);
+        cur.meshes[ti].tris.push([cmd[0], cmd[1], cmd[2]]);
     }
-    let total_tris: usize = parts.iter().map(|p| p.tris.len()).sum();
+    let total_tris: usize = parts
+        .iter()
+        .flat_map(|p| &p.meshes)
+        .map(|m| m.tris.len())
+        .sum();
     report.push(format!(
-        "triangles: {} in, {degenerate} zero-area and {welded_degenerate} collapsed by welding dropped, {total_tris} out; zero-error edge collapse {before_reduce} → {} (C1)",
+        "triangles: {} in, {degenerate} zero-area and {welded_degenerate} collapsed by welding dropped, {total_tris} out; zero-error edge collapse {before_reduce} → {after_lossless} (C1)",
         kept.iter().map(|&i| av.parts[i].triangles.len()).sum::<usize>(),
-        tris.len()
     ));
 
     let bodyparts: Vec<Bodypart> = parts
@@ -698,13 +843,38 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
             } else {
                 format!("body{}", i + 1)
             };
-            let commands = crate::strip::strips(&p.tris);
+            let mut norms = Vec::new();
+            let mut norm_bones = Vec::new();
+            let mut meshes = Vec::new();
+            let mut strips = 0;
+            for (ti, mb) in p.meshes.into_iter().enumerate() {
+                if mb.tris.is_empty() {
+                    continue;
+                }
+                let off = norms.len() as i16;
+                let tris: Vec<[[i16; 4]; 3]> = mb
+                    .tris
+                    .iter()
+                    .map(|t| t.map(|[v, n, s, t]| [v, n + off, s, t]))
+                    .collect();
+                let commands = crate::strip::strips(&tris);
+                strips += commands.len();
+                meshes.push(Mesh {
+                    num_tris: tris.len() as i32,
+                    skinref: ti as i32,
+                    num_norms: mb.norms.len() as i32,
+                    norm_index: off as i32,
+                    commands,
+                });
+                norms.extend(mb.norms);
+                norm_bones.extend(mb.norm_bones);
+            }
             report.push(format!(
-                "bodypart {name}: {} verts, {} normals, {} triangles in {} strips",
+                "bodypart {name}: {} verts, {} normals, {} triangles in {} meshes and {strips} strips",
                 p.verts.len(),
-                p.norms.len(),
-                p.tris.len(),
-                commands.len()
+                norms.len(),
+                meshes.iter().map(|m| m.num_tris).sum::<i32>(),
+                meshes.len()
             ));
             Bodypart {
                 name: name.clone(),
@@ -715,15 +885,9 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
                     bounding_radius: 0.0,
                     vert_bones: p.vert_bones,
                     verts: p.verts,
-                    norm_bones: p.norm_bones,
-                    norms: p.norms,
-                    meshes: vec![Mesh {
-                        num_tris: p.tris.len() as i32,
-                        skinref: 0,
-                        num_norms: p.nmap.len() as i32,
-                        norm_index: 0,
-                        commands,
-                    }],
+                    norm_bones,
+                    norms,
+                    meshes,
                 }],
             }
         })
@@ -856,16 +1020,9 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
         hitboxes,
         sequences,
         seq_groups,
-        textures: vec![Texture {
-            name: format!("{}.bmp", o.name),
-            flags: if unlit { FLATSHADE } else { 0 },
-            width: tex.width as i32,
-            height: tex.height as i32,
-            palette: tex.palette_bytes(),
-            pixels: tex.pixels,
-        }],
-        num_skinref: 1,
-        skin_families: vec![vec![0]],
+        num_skinref: textures.len() as i32,
+        skin_families: vec![(0..textures.len() as i16).collect()],
+        textures,
         bodyparts,
         attachments,
         num_transitions: donor.num_transitions,

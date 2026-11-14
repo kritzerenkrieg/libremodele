@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use libremodele::{convert, mdl, preview, sway, texture, vrm};
 
 const USAGE: &str = "usage:
-  libremodele convert <avatar.vrm> --donor <donor.mdl> --name <name> [--height <units>] [--manifest <clean_manifest.json>] [--out <dir>] [--sway]
+  libremodele convert <avatar.vrm> --donor <donor.mdl> --name <name> [--height <units>] [--max-tris <n>] [--manifest <clean_manifest.json>] [--out <dir>] [--sway]
   libremodele preview <file.mdl> <out.png>
   libremodele mdl-info <file.mdl>
   libremodele mdl-roundtrip <in.mdl> <out.mdl>";
@@ -69,6 +69,10 @@ fn convert_cmd(vrm_path: &str, rest: &[&str]) -> Result<()> {
         .map(str::parse::<f32>)
         .transpose()
         .context("--height must be a number")?;
+    let max_tris = flag(rest, "--max-tris")
+        .map(str::parse::<usize>)
+        .transpose()
+        .context("--max-tris must be a whole number")?;
     let out = PathBuf::from(flag(rest, "--out").unwrap_or("out"));
     let mut keep = HashMap::new();
     if let Some(m) = flag(rest, "--manifest") {
@@ -94,6 +98,7 @@ fn convert_cmd(vrm_path: &str, rest: &[&str]) -> Result<()> {
             name: name.to_string(),
             height,
             keep,
+            max_tris,
         },
     )?;
     let mut c = c;

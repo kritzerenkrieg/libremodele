@@ -32,6 +32,7 @@ fn lucian_converts() {
             name: "lucian".into(),
             height: None,
             keep: HashMap::new(),
+            max_tris: None,
         },
     )
     .unwrap();
@@ -142,4 +143,51 @@ fn lucian_converts() {
             }
         }
     }
+}
+
+/// Miku (VRM, 65,737 tris, 191 chain-heavy bones, 4 images with alpha):
+/// the bone budget (D2), lossy decimation (C4, C8) and one texture per
+/// image with masks (C5, D6). Local fixture only (A6).
+#[test]
+fn miku_converts() {
+    let (Some(v), Some(d)) = (
+        sample("miku/HatsuneMikuNT.vrm"),
+        sample("yuki_ref/models/player/yuki_muumuyu/yuki_muumuyu.mdl"),
+    ) else {
+        return;
+    };
+    let av = vrm::load(&v).unwrap();
+    let donor = mdl::read(&d).unwrap();
+    let opts = convert::Options {
+        name: "miku".into(),
+        height: None,
+        keep: HashMap::new(),
+        max_tris: None,
+    };
+    let c = convert::convert(&av, &donor, &opts).unwrap();
+    let m = &c.model;
+    assert_eq!(m.bones.len(), convert::MAX_BONES);
+    assert!(
+        m.tri_count() <= 9000 && m.tri_count() > 8500,
+        "{}",
+        m.tri_count()
+    );
+    for sm in m.bodyparts.iter().flat_map(|b| &b.models) {
+        assert!(sm.verts.len() <= convert::MAX_VERTS && sm.norms.len() <= convert::MAX_VERTS);
+        // Normals run mesh by mesh, in order (GoldSrc lights them that way).
+        let mut next = 0;
+        for me in &sm.meshes {
+            assert_eq!(me.norm_index, next);
+            next += me.num_norms;
+        }
+        assert_eq!(next as usize, sm.norms.len());
+    }
+    // Body, costume, hair, hair cutout, transparent cutout.
+    let masked = m.textures.iter().filter(|t| t.flags & 0x40 != 0).count();
+    assert_eq!((m.textures.len(), masked), (5, 2));
+    assert_eq!(m.skin_families, vec![(0..5).collect::<Vec<i16>>()]);
+    assert_eq!(mdl::read(&mdl::write(m).unwrap()).unwrap(), *m);
+    // Deterministic: the same input gives the same model.
+    let again = convert::convert(&av, &donor, &opts).unwrap();
+    assert_eq!(again.model, *m);
 }

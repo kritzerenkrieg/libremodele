@@ -24,9 +24,16 @@ impl Indexed {
 
 /// Decode `png`, fit it within `max` (sides a multiple of 8) and reduce to 256 colours.
 pub fn goldsrc_texture(png: &[u8], max: u32) -> Result<Indexed> {
+    goldsrc_texture_masked(png, max, false)
+}
+
+/// As `goldsrc_texture`; with `masked`, texels under half alpha become index
+/// 255, which GoldSrc's masked flag draws as see-through (D6), and the
+/// visible texels share the other 255 colours.
+pub fn goldsrc_texture_masked(png: &[u8], max: u32, masked: bool) -> Result<Indexed> {
     let img = image::load_from_memory(png)
         .context("decoding texture")?
-        .to_rgb8();
+        .to_rgba8();
     let (w, h) = img.dimensions();
     let scale = (max as f32 / w.max(h) as f32).min(1.0);
     let fit = |v: u32| (((v as f32 * scale) as u32) / 8 * 8).max(8);
@@ -36,30 +43,55 @@ pub fn goldsrc_texture(png: &[u8], max: u32) -> Result<Indexed> {
     } else {
         img
     };
-    let px: Vec<[u8; 3]> = img.pixels().map(|p| p.0).collect();
-    Ok(quantise(&px, nw, nh))
+    if !masked {
+        let px: Vec<[u8; 3]> = img.pixels().map(|p| [p.0[0], p.0[1], p.0[2]]).collect();
+        return Ok(quantise(&px, nw, nh));
+    }
+    let clear: Vec<bool> = img.pixels().map(|p| p.0[3] < 128).collect();
+    let px: Vec<[u8; 3]> = img
+        .pixels()
+        .zip(&clear)
+        .filter(|(_, c)| !**c)
+        .map(|(p, _)| [p.0[0], p.0[1], p.0[2]])
+        .collect();
+    let mut q = quantise_n(&px, nw, nh, 255);
+    q.palette.push([0, 0, 255]);
+    let mut opaque = q.pixels.into_iter();
+    q.pixels = clear
+        .iter()
+        .map(|&c| if c { 255 } else { opaque.next().unwrap() })
+        .collect();
+    Ok(q)
 }
 
 /// Median-cut quantisation to at most 256 colours (exact if the image has no more).
 pub fn quantise(px: &[[u8; 3]], width: u32, height: u32) -> Indexed {
+    quantise_n(px, width, height, 256)
+}
+
+/// `quantise` into `n` palette entries, all filled with distinct colours.
+fn quantise_n(px: &[[u8; 3]], width: u32, height: u32, n: usize) -> Indexed {
     let mut counts: HashMap<[u8; 3], u32> = HashMap::new();
     for p in px {
         *counts.entry(*p).or_default() += 1;
     }
-    let palette: Vec<[u8; 3]> = if counts.len() <= 256 {
+    let palette: Vec<[u8; 3]> = if counts.len() <= n {
         let mut c: Vec<[u8; 3]> = counts.keys().copied().collect();
         c.sort();
         c
     } else {
-        median_cut(counts.into_iter().collect(), 256)
+        // Sorted, so ties in the cut fall the same way every run.
+        let mut c: Vec<([u8; 3], u32)> = counts.into_iter().collect();
+        c.sort();
+        median_cut(c, n)
     };
     // Sven treats a portrait palette under 224 colours as a remap image (A11),
-    // so always fill all 256 entries with distinct colours.
+    // so always fill every entry with a distinct colour.
     let mut palette = palette;
     let mut filler = (0..=255u8).flat_map(|r| [[r, r / 2, 255 - r], [255 - r, r, r / 3]]);
-    while palette.len() < 256 {
+    while palette.len() < n {
         let c = filler.next().expect("enough filler colours");
-        if !palette.contains(&c) {
+        if !palette.contains(&c) && c != [0, 0, 255] {
             palette.push(c);
         }
     }
@@ -199,6 +231,29 @@ mod tests {
         let q = quantise(&px, 64, 64);
         assert!(q.palette.len() <= 256);
         assert_eq!(q.pixels.len(), 4096);
+    }
+
+    #[test]
+    fn masked_keeps_index_255_for_clear_texels() {
+        let mut img = image::RgbaImage::new(8, 8);
+        for (x, _, p) in img.enumerate_pixels_mut() {
+            *p = image::Rgba(if x < 4 {
+                [200, 10, 10, 255]
+            } else {
+                [0, 0, 0, 0]
+            });
+        }
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let q = goldsrc_texture_masked(&png, 512, true).unwrap();
+        assert_eq!(q.palette.len(), 256);
+        assert_eq!(q.palette[255], [0, 0, 255]);
+        for (i, &px) in q.pixels.iter().enumerate() {
+            assert_eq!(px == 255, i % 8 >= 4, "texel {i}");
+        }
+        assert_eq!(q.palette[q.pixels[0] as usize], [200, 10, 10]);
     }
 
     #[test]

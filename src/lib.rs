@@ -2,6 +2,7 @@
 //! playermodels as one standalone program (A1, A7).
 
 pub mod convert;
+pub mod decimate;
 pub mod math;
 pub mod mdl;
 pub mod preview;

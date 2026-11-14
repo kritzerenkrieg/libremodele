@@ -10,3 +10,8 @@ publish = false
 anyhow = "1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 serde_json = "1.0.154"
+
+# Sample tests decimate a 65k-triangle avatar twice (C8); unoptimised that
+# takes minutes.
+[profile.test]
+opt-level = 2

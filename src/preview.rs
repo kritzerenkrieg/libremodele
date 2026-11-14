@@ -35,6 +35,9 @@ pub fn bone_worlds(m: &Model, pose: Option<(usize, usize)>) -> Vec<Xf> {
 }
 
 /// A drawable triangle: world positions, world normals and texture coordinates in pixels.
+/// `STUDIO_NF_MASKED`: palette index 255 is transparent.
+pub const MASKED: i32 = 0x40;
+
 pub struct Tri {
     pub p: [V3; 3],
     pub n: [V3; 3],
@@ -237,12 +240,16 @@ pub fn render(
                 if depth <= z[zi] {
                     continue;
                 }
-                z[zi] = depth;
                 let ss = w0 * t.st[0][0] + w1 * t.st[1][0] + w2 * t.st[2][0];
                 let tt = w0 * t.st[0][1] + w1 * t.st[1][1] + w2 * t.st[2][1];
                 let tx = (ss.floor() as i32).rem_euclid(tex.width) as usize;
                 let ty = (tt.floor() as i32).rem_euclid(tex.height) as usize;
                 let pi = tex.pixels[ty * tex.width as usize + tx] as usize;
+                // Masked textures (D6): index 255 is see-through.
+                if pi == 255 && tex.flags & MASKED != 0 {
+                    continue;
+                }
+                z[zi] = depth;
                 let c = &tex.palette[pi * 3..pi * 3 + 3];
                 img.put_pixel(
                     x as u32,

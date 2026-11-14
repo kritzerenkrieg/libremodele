@@ -11,6 +11,7 @@ fn main() {
             name: "x".into(),
             height: None,
             keep: Default::default(),
+            max_tris: None,
         },
     )
     .unwrap();

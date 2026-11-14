@@ -66,6 +66,12 @@ flowchart LR
 - [x] G5 under A14: user reviewed `out/review/lucian/preview.png` and the thumbnail. Done when: user confirms. Confirmed 2026-11-14; in-game check passed the same day
 - [x] Update `ARCHITECTURE.md` (D codes). Done when: sections B to J match the code. Passed 2026-11-14 (full rewrite to the standalone Rust design; Source back end marked planned)
 
+### Hardening before "stable" (user, 2026-11-14): three more avatars
+
+- [x] Miku (VRM, 65,737 tris, 191 bones, 4 images with alpha) converts: bone budget merges the deepest chain links (D2), one texture per (image, masked) with per-mesh normal runs (C5, D6), lossy QEM to the Sven 9k budget with optimal placement and staged locks (C2, C4, C8), deterministic output. Done when: `tests/convert.rs` `miku_converts` passes. Passed 2026-11-14
+- [ ] Miku in game (Sven, local listen server, `miku` and `miku_sway`). Done when: user confirms
+- [ ] Neru and Gothic Doll: FBX only, blocked on B9 (FBX input, Question)
+
 ## Phase E: Source back end
 
 **Goal:** fixture becomes a GMod (or A3 target) server playermodel addon.

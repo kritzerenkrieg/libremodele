@@ -29,6 +29,8 @@ pub struct Part {
     /// Image index of the base colour texture.
     pub image: Option<usize>,
     pub unlit: bool,
+    /// glTF `alphaMode` MASK or BLEND: drawn with a cutout in GoldSrc (C5, D6).
+    pub masked: bool,
     pub first_person_only: bool,
 }
 
@@ -251,12 +253,13 @@ pub fn load(bytes: &[u8]) -> Result<Avatar> {
         {
             let id = format!("{}/{}#{pi}", nodes[ni].name, mesh_name);
             let part = primitive(&g, p, ni, skin, &nodes).with_context(|| id.clone())?;
-            let (image, unlit) = material(j, p)?;
+            let (image, unlit, masked) = material(j, p)?;
             parts.push(Part {
                 id,
                 node_name: nodes[ni].name.clone(),
                 image,
                 unlit,
+                masked,
                 first_person_only: first_person_only.contains(&mesh),
                 ..part
             });
@@ -355,16 +358,21 @@ fn is_descendant(i: usize, root: usize, parent: &[Option<usize>]) -> bool {
     false
 }
 
-fn material(j: &Value, p: &Value) -> Result<(Option<usize>, bool)> {
+/// (base colour image, unlit, masked) of a primitive's material.
+fn material(j: &Value, p: &Value) -> Result<(Option<usize>, bool, bool)> {
     let Some(mi) = p.get("material").and_then(Value::as_u64) else {
-        return Ok((None, false));
+        return Ok((None, false, false));
     };
     let m = j
         .pointer(&format!("/materials/{mi}"))
         .ok_or_else(|| anyhow!("material {mi} missing"))?;
     let unlit = m.pointer("/extensions/KHR_materials_unlit").is_some();
+    let masked = matches!(
+        m.get("alphaMode").and_then(Value::as_str),
+        Some("MASK" | "BLEND")
+    );
     let Some(tex) = m.pointer("/pbrMetallicRoughness/baseColorTexture") else {
-        return Ok((None, unlit));
+        return Ok((None, unlit, masked));
     };
     if let Some(tt) = tex.pointer("/extensions/KHR_texture_transform") {
         let off = floats(tt.get("offset")).unwrap_or(vec![0.0, 0.0]);
@@ -382,7 +390,7 @@ fn material(j: &Value, p: &Value) -> Result<(Option<usize>, bool)> {
         .pointer(&format!("/textures/{ti}/source"))
         .and_then(Value::as_u64)
         .ok_or_else(|| anyhow!("texture {ti} has no source"))?;
-    Ok((Some(src as usize), unlit))
+    Ok((Some(src as usize), unlit, masked))
 }
 
 fn primitive(g: &Glb, p: &Value, node: usize, skin: Option<usize>, nodes: &[Node]) -> Result<Part> {
@@ -498,6 +506,7 @@ fn primitive(g: &Glb, p: &Value, node: usize, skin: Option<usize>, nodes: &[Node
         triangles,
         image: None,
         unlit: false,
+        masked: false,
         first_person_only: false,
     })
 }

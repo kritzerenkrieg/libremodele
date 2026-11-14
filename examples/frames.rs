@@ -9,10 +9,15 @@ fn main() {
     let m = mdl::read(&std::fs::read(&a[0]).unwrap()).unwrap();
     let si = m.sequences.iter().position(|s| s.label == a[1]).unwrap();
     let n = m.sequences[si].num_frames as usize;
-    let count = 8.min(n);
+    let count = if a.get(3).is_some() {
+        4.min(n)
+    } else {
+        8.min(n)
+    };
     let wind = preview::winding_sign(&m);
     let rest = preview::triangles(&m, &preview::bone_worlds(&m, None));
-    let (w, h) = (180, 240);
+    let scale: u32 = a.get(3).map_or(1, |x| x.parse().unwrap());
+    let (w, h) = (180 * scale, 240 * scale);
     let mut out = RgbImage::new(w * count as u32, h * 2);
     for (row, view) in [View::Front, View::Side].into_iter().enumerate() {
         let (cx, cy, half) = preview::framing(&rest, view);

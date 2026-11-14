@@ -46,6 +46,10 @@ pub struct Rig {
     /// Chain bones in parent-first order, with their group.
     pub chains: Vec<(usize, usize)>,
     pub groups: Vec<Group>,
+    /// Bone-local tail for chain bones whose child links were merged away
+    /// (D2 bone budget): the first merged child's joint, so the spring's
+    /// lever matches the avatar's instead of a short virtual tail.
+    pub tails: std::collections::HashMap<usize, V3>,
 }
 
 pub struct Summary {
@@ -216,13 +220,14 @@ fn simulate(m: &Model, rig: &Rig, si: usize, b: usize) -> Vec<Vec<V3>> {
             let rest_pos = [bn.value[0], bn.value[1], bn.value[2]];
             let rest_angles = [bn.value[3], bn.value[4], bn.value[5]];
             let child = m.bones.iter().position(|c| c.parent == bone as i32);
-            let local_tail = match child {
-                Some(c) => [
+            let local_tail = match (child, rig.tails.get(&bone)) {
+                (Some(c), _) => [
                     m.bones[c].value[0],
                     m.bones[c].value[1],
                     m.bones[c].value[2],
                 ],
-                None => {
+                (None, Some(&t)) => t,
+                (None, None) => {
                     // Parent → bone direction, expressed in the bone's frame.
                     let rot = M3::from_gs_angles(rest_angles);
                     let d = norm(rest_pos);
