@@ -18,7 +18,7 @@ flowchart LR
 **Goal:** settle what blocks Phase B, and the target numbers that B–D depend on.
 **Exit:** every A and B row in `DECISIONS.md` is Decided. A11 limits are recorded.
 
-- [ ] Triage all Question rows with the user (A1–F3). Done when: no row is Question
+- [x] Triage all Question rows with the user (A1–F3). Done when: no row is Question. Passed 2026-11-14 (C8 Decided; E1–E4 Decided; F1–F3 TBD until Phase F)
 - [x] Test fixtures: Lucian (VRM/FBX/blend/unitypackage) and yuki_ref (Sven MDL) in `samples/`, local only (A5, A6). Recorded in A5 and A6
 - [x] ~~Spike: studiomdl under Wine~~, replaced by A9 (own writer): MDL v10 round trip on yuki_ref (A9, A10). Done when: `cargo test --test roundtrip` passes. Passed 2026-11-14
 - [ ] [P] Spike: confirm the GoldSrc + Source limits for the A3/A4 targets (A11). Done when: §I table in `ARCHITECTURE.md` shows confirmed numbers
@@ -64,7 +64,7 @@ flowchart LR
 - [x] Spike: procedural sway for chain bones (D13, D15). Done when: D15 has a design with evidence. Passed 2026-11-14 (Option A chosen)
 - [x] Optional chain sway, UniVRM spring port (D13, D15, D16). Done when: `--sway` adds sway within every sequence's 64 KB budget, body channels unchanged, re-read identical (`tests/convert.rs`), and frame strips show no tearing. Passed 2026-11-14: Lucian 10 bones, 192/192 sequences, +0.51 MB
 - [x] G5 under A14: user reviewed `out/review/lucian/preview.png` and the thumbnail. Done when: user confirms. Confirmed 2026-11-14
-- [ ] Update `ARCHITECTURE.md` (D codes). Done when: sections B to J match the code
+- [x] Update `ARCHITECTURE.md` (D codes). Done when: sections B to J match the code. Passed 2026-11-14 (full rewrite to the standalone Rust design; Source back end marked planned)
 
 ## Phase E: Source back end
 
@@ -72,8 +72,8 @@ flowchart LR
 **Exit:** addon loads on a local server and the model is selectable and animates.
 
 - [ ] ValveBiped mapping + smooth-weight cap (E1, E2). Done when: max weights/vertex ≤ A11 value (test)
-- [ ] VTF/VMT generation (E3). Done when: textures open in a VTF viewer / load in game
-- [ ] QC with `$includemodel` anims + addon layout + Lua registration (E1, E4). Done when: compile passes and the addon folder matches the spec
+- [ ] Own DXT1/DXT5 VTF + VMT writer (E3). Done when: textures open in a VTF viewer / load in game
+- [ ] Own Source MDL/VVD/VTX writer with `$includemodel` anims, addon layout + Lua registration (A1, E1, E4). Done when: our re-read matches and the addon folder matches the spec
 - [ ] Manual G5 in game. Done when: user confirms
 - [ ] Update `ARCHITECTURE.md` (E codes). Done when: sections B to J match the code
 
