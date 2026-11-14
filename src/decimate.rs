@@ -12,6 +12,16 @@
 //! 2. Vertices on a UV seam or an open border may slide along it; seam and
 //!    border corners (three or more such edges) stay.
 //!
+//!
+//! Then, still at stage 2, the clearance caps below loosen step by step
+//! (a quarter of the gap, half, three quarters, none) until the budget is met.
+//!
+//! Layers: surfaces that sit close over others (face skin over the eyes,
+//! hair over the scalp) clip through them when moved by even a fraction of a
+//! unit, which plane distance alone can't see. Each vertex's **clearance** is
+//! its distance to the nearest triangle of a different connected piece; a
+//! collapse may move it by at most a share of that, a quarter at first.
+//!
 //! Every stage keeps the mesh manifold (link condition), refuses folds, and
 //! adds penalty planes along borders and seams so their outlines hold.
 
@@ -39,6 +49,149 @@ pub struct Stats {
     /// to the original triangle planes it had absorbed.
     pub max_error: f32,
     pub collapses: usize,
+    /// Vertices whose movement was capped by a nearby other layer.
+    pub near_layers: usize,
+    /// Share of the clearance a vertex could move in the last step used
+    /// (infinite: caps lifted).
+    pub clearance_share: f64,
+}
+
+/// (lock stage, clearance share) steps, tried in order until the budget is met.
+const STEPS: [(u8, f64); 6] = [
+    (0, 0.25),
+    (1, 0.25),
+    (2, 0.25),
+    (2, 0.5),
+    (2, 0.75),
+    (2, f64::INFINITY),
+];
+/// Clearances are measured up to this far (game units); beyond, no cap.
+const CLEARANCE_RANGE: f32 = 1.5;
+
+/// Closest distance from `p` to triangle `t` (Ericson, Real-Time Collision
+/// Detection, 5.1.5).
+fn point_tri(p: V3, t: [V3; 3]) -> f32 {
+    let [a, b, c] = t;
+    let (ab, ac, ap) = (sub(b, a), sub(c, a), sub(p, a));
+    let (d1, d2) = (dot(ab, ap), dot(ac, ap));
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return len(ap);
+    }
+    let bp = sub(p, b);
+    let (d3, d4) = (dot(ab, bp), dot(ac, bp));
+    if d3 >= 0.0 && d4 <= d3 {
+        return len(bp);
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let v = d1 / (d1 - d3);
+        return len(sub(p, [0, 1, 2].map(|k| a[k] + ab[k] * v)));
+    }
+    let cp = sub(p, c);
+    let (d5, d6) = (dot(ab, cp), dot(ac, cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return len(cp);
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let w = d2 / (d2 - d6);
+        return len(sub(p, [0, 1, 2].map(|k| a[k] + ac[k] * w)));
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        let bc = sub(c, b);
+        return len(sub(p, [0, 1, 2].map(|k| b[k] + bc[k] * w)));
+    }
+    let n = cross(ab, ac);
+    let nl = len(n);
+    if nl < 1e-12 {
+        return len(ap);
+    }
+    (dot(ap, n) / nl).abs()
+}
+
+/// The original surface, bucketed for "how far is the nearest other piece?"
+/// queries. Pieces are connected by shared vertices (eyes, scalp and hair
+/// are separate pieces).
+struct Layers {
+    piece: Vec<usize>,
+    tris: Vec<([V3; 3], usize)>,
+    grid: HashMap<[i32; 3], Vec<usize>>,
+}
+
+impl Layers {
+    fn new(pos: &[V3], tris: &[Option<Tri>]) -> Layers {
+        let mut root: Vec<usize> = (0..pos.len()).collect();
+        fn find(r: &mut [usize], mut x: usize) -> usize {
+            while r[x] != x {
+                r[x] = r[r[x]];
+                x = r[x];
+            }
+            x
+        }
+        for t in tris.iter().flatten() {
+            let a = find(&mut root, t[0].0);
+            for x in &t[1..] {
+                let b = find(&mut root, x.0);
+                root[b] = a;
+            }
+        }
+        let piece: Vec<usize> = (0..pos.len()).map(|x| find(&mut root, x)).collect();
+        let mut grid: HashMap<[i32; 3], Vec<usize>> = HashMap::new();
+        let mut list = Vec::new();
+        for t in tris.iter().flatten() {
+            let ps = t.map(|x| pos[x.0]);
+            let lo =
+                Self::cell([0, 1, 2].map(|k| ps.iter().map(|p| p[k]).fold(f32::MAX, f32::min)));
+            let hi =
+                Self::cell([0, 1, 2].map(|k| ps.iter().map(|p| p[k]).fold(f32::MIN, f32::max)));
+            for x in lo[0]..=hi[0] {
+                for y in lo[1]..=hi[1] {
+                    for z in lo[2]..=hi[2] {
+                        grid.entry([x, y, z]).or_default().push(list.len());
+                    }
+                }
+            }
+            list.push((ps, piece[t[0].0]));
+        }
+        Layers {
+            piece,
+            tris: list,
+            grid,
+        }
+    }
+
+    fn cell(p: V3) -> [i32; 3] {
+        p.map(|x| (x / CLEARANCE_RANGE).floor() as i32)
+    }
+
+    /// Distance from `p` to the nearest original triangle of a piece other
+    /// than `own`, or infinity beyond `CLEARANCE_RANGE`.
+    fn gap(&self, p: V3, own: usize) -> f32 {
+        let c = Self::cell(p);
+        let mut best = f32::INFINITY;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let Some(list) = self.grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz]) else {
+                        continue;
+                    };
+                    for &ti in list {
+                        let (t, pc) = self.tris[ti];
+                        if pc != own {
+                            best = best.min(point_tri(p, t));
+                        }
+                    }
+                }
+            }
+        }
+        if best <= CLEARANCE_RANGE {
+            best
+        } else {
+            f32::INFINITY
+        }
+    }
 }
 
 /// Symmetric 4×4 plane quadric: aa ab ac ad bb bc bd cc cd dd.
@@ -412,6 +565,12 @@ pub fn decimate(input: &[[Vtx; 3]], target: usize) -> (Vec<[Vtx; 3]>, Stats) {
         orig,
     };
 
+    let layers = Layers::new(&m.pos, &m.tris);
+    let mut cap: Vec<f64> = (0..m.pos.len())
+        .map(|x| f64::from(layers.gap(m.pos[x], layers.piece[x])))
+        .collect();
+    stats.near_layers = cap.iter().filter(|c| c.is_finite()).count();
+
     // Quadrics: area-weighted for ordering, unweighted for the error report.
     let n = m.pos.len();
     let mut q = vec![[0.0f64; 10]; n];
@@ -463,8 +622,9 @@ pub fn decimate(input: &[[Vtx; 3]], target: usize) -> (Vec<[Vtx; 3]>, Stats) {
 
     let mut live = m.tris.len();
     let mut stamp = vec![0u32; n];
-    for stage in 0..=2u8 {
+    for (stage, share) in STEPS {
         stats.stage = stage;
+        stats.clearance_share = share;
         let mut heap = BinaryHeap::new();
         let push = |heap: &mut BinaryHeap<Entry>, m: &Mesh, q: &[Quad], stamp: &[u32], x: usize| {
             let fx = free(m, x, stage);
@@ -491,6 +651,46 @@ pub fn decimate(input: &[[Vtx; 3]], target: usize) -> (Vec<[Vtx; 3]>, Stats) {
             let Some(p) = plan(&m, &q, u, v, stage) else {
                 continue;
             };
+            // Clearance: no vertex moves further from its original surface
+            // than its share of the gap to the next layer. sqrt of the summed
+            // squares bounds the largest plane distance.
+            if share.is_finite() {
+                let far = |x: usize, to: V3| eval(&qe[x], to).max(0.0).sqrt() > cap[x] * share;
+                let mut blocked = match p.moved {
+                    Some(to) => far(u, to) || far(v, to),
+                    None => far(u, m.pos[v]),
+                };
+                // The new triangles' insides too: a chord between two corners
+                // still on the surface dips inward, and through a close layer.
+                let after = |id: usize| if id == u { v } else { id };
+                for (_, nc) in &p.rewrite {
+                    if blocked {
+                        break;
+                    }
+                    let gap = nc
+                        .iter()
+                        .map(|x| cap[x.0].min(cap[after(x.0)]))
+                        .fold(cap[u].min(cap[v]), f64::min);
+                    if !gap.is_finite() {
+                        continue;
+                    }
+                    let ps = nc.map(|x| x.1.p);
+                    let mid = |a: V3, b: V3| [0, 1, 2].map(|k| (a[k] + b[k]) / 2.0);
+                    let samples = [
+                        [0, 1, 2].map(|k| (ps[0][k] + ps[1][k] + ps[2][k]) / 3.0),
+                        mid(ps[0], ps[1]),
+                        mid(ps[1], ps[2]),
+                        mid(ps[2], ps[0]),
+                    ];
+                    let own = layers.piece[nc[0].0];
+                    blocked = samples
+                        .iter()
+                        .any(|&sp| f64::from(layers.gap(sp, own)) < gap * (1.0 - share));
+                }
+                if blocked {
+                    continue;
+                }
+            }
             let err = match p.moved {
                 Some(to) => {
                     eval(&sum_q(&qe[u], &qe[v]), to).max(0.0)
@@ -519,6 +719,7 @@ pub fn decimate(input: &[[Vtx; 3]], target: usize) -> (Vec<[Vtx; 3]>, Stats) {
             add_q(&mut q[v], &qu);
             add_q(&mut qe[v], &qeu);
             planes[v] += planes[u];
+            cap[v] = cap[v].min(cap[u]);
             stamp[v] += 1;
             push(&mut heap, &m, &q, &stamp, v);
             for x in m.ring(v) {
@@ -656,6 +857,41 @@ mod tests {
                 "a triangle spans both surfaces: {tri:?}"
             );
         }
+    }
+
+    #[test]
+    fn outer_shell_does_not_sink_through_inner_one() {
+        // Hair over a scalp: a closed sphere of radius 10 over one of 9.7
+        // (separate pieces). Decimating hard must not push the outer shell's
+        // surface through the inner one. (A sphere is kind to quadrics, so
+        // this guards against regressions; Miku's head is the real case.)
+        let outer = sphere(24, 32);
+        let inner: Vec<[Vtx; 3]> = sphere(12, 16)
+            .into_iter()
+            .map(|t| {
+                t.map(|v| Vtx {
+                    p: v.p.map(|x| x * 0.97),
+                    tex: 1,
+                    ..v
+                })
+            })
+            .collect();
+        let all: Vec<[Vtx; 3]> = outer.iter().chain(&inner).copied().collect();
+        let (r, st) = decimate(&all, inner.len() + 900);
+        assert!(st.reached && st.clearance_share.is_finite(), "{st:?}");
+        // Every outer triangle's centroid stays outside the inner sphere.
+        for t in r.iter().filter(|t| t[0].tex == 0) {
+            let c = [0, 1, 2].map(|k| (t[0].p[k] + t[1].p[k] + t[2].p[k]) / 3.0);
+            assert!(len(c) > 9.70, "outer surface sank to {}", len(c));
+        }
+    }
+
+    #[test]
+    fn point_triangle_distance() {
+        let t = [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]];
+        assert!((point_tri([0.5, 0.5, 3.0], t) - 3.0).abs() < 1e-6);
+        assert!((point_tri([-1.0, 0.0, 0.0], t) - 1.0).abs() < 1e-6);
+        assert!((point_tri([2.0, 2.0, 0.0], t) - 2f32.sqrt()).abs() < 1e-5);
     }
 
     #[test]

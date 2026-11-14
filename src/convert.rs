@@ -89,7 +89,7 @@ pub struct Options {
     pub height: Option<f32>,
     /// Clean-manifest overrides: part id → keep (B4).
     pub keep: HashMap<String, bool>,
-    /// Triangle budget for lossy reduction (C4, C8); default Sven's guidance.
+    /// Triangle budget for lossy reduction (C4, C8); default the 20k engine maximum.
     pub max_tris: Option<usize>,
 }
 
@@ -682,14 +682,21 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
     ));
 
     // Lossy decimation to the budget (C4, C8), only when over it.
-    let budget = o.max_tris.unwrap_or(SVEN_POLY_GUIDE).min(MAX_TRIS);
+    // Default: the engine maximum (C4); Sven's guidance only warns (A13).
+    let budget = o.max_tris.unwrap_or(MAX_TRIS).min(MAX_TRIS);
     let after_lossless = lossless.len();
     let (mut tris, dst) = crate::decimate::decimate(&lossless, budget);
     if after_lossless > budget {
         report.push(format!(
-            "decimation (C8): {after_lossless} → {} triangles for a budget of {budget}; lock stage {} (0 all locked, 1 bone boundaries free, 2 seams and borders slide), {} collapses, max error {:.2} units{}",
+            "decimation (C8): {after_lossless} → {} triangles for a budget of {budget}; lock stage {} (0 all locked, 1 bone boundaries free, 2 seams and borders slide), moves capped at {} of the gap to a nearby layer ({} vertices near one), {} collapses, max error {:.2} units{}",
             tris.len(),
             dst.stage,
+            if dst.clearance_share.is_finite() {
+                format!("{}×", dst.clearance_share)
+            } else {
+                "no limit".to_string()
+            },
+            dst.near_layers,
             dst.collapses,
             dst.max_error,
             if dst.reached { "" } else { "; budget not reached" }

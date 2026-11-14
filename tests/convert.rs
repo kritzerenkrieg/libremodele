@@ -167,8 +167,9 @@ fn miku_converts() {
     let c = convert::convert(&av, &donor, &opts).unwrap();
     let m = &c.model;
     assert_eq!(m.bones.len(), convert::MAX_BONES);
+    // Default budget: the 20k engine maximum (C4).
     assert!(
-        m.tri_count() <= 9000 && m.tri_count() > 8500,
+        m.tri_count() <= 20000 && m.tri_count() > 19500,
         "{}",
         m.tri_count()
     );

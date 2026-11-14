@@ -68,7 +68,7 @@ flowchart LR
 
 ### Hardening before "stable" (user, 2026-11-14): three more avatars
 
-- [x] Miku (VRM, 65,737 tris, 191 bones, 4 images with alpha) converts: bone budget merges the deepest chain links (D2), one texture per (image, masked) with per-mesh normal runs (C5, D6), lossy QEM to the Sven 9k budget with optimal placement and staged locks (C2, C4, C8), deterministic output. Done when: `tests/convert.rs` `miku_converts` passes. Passed 2026-11-14
+- [x] Miku (VRM, 65,737 tris, 191 bones, 4 images with alpha) converts: bone budget merges the deepest chain links (D2), one texture per (image, masked) with per-mesh normal runs (C5, D6), lossy QEM to the 20k default budget (C4, revised after the first in-game test showed a bald, broken face at 9k) with optimal placement, staged locks and layer clearance caps so skin can't move through the hair or over the eyes (C2, C8), deterministic output. Done when: `tests/convert.rs` `miku_converts` passes. Passed 2026-11-14
 - [ ] Miku in game (Sven, local listen server, `miku` and `miku_sway`). Done when: user confirms
 - [ ] Neru and Gothic Doll: FBX only, blocked on B9 (FBX input, Question)
 

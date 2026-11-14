@@ -12,8 +12,11 @@ fn main() {
     let wind = preview::winding_sign(&m);
     let t = preview::triangles(&m, &preview::bone_worlds(&m, None));
     let (w, h) = (500, 500);
-    let mut out = RgbImage::new(w * 2, h);
-    for (i, view) in [View::Front, View::Side].into_iter().enumerate() {
+    let mut out = RgbImage::new(w * 3, h);
+    for (i, view) in [View::Front, View::Side, View::Back]
+        .into_iter()
+        .enumerate()
+    {
         let (cx, cy, half) = preview::framing(&t, view);
         // Screen y grows downward; the top of the model is cy - half.
         let z = half * frac;
