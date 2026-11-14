@@ -59,7 +59,9 @@ flowchart LR
 - [x] Retarget to the donor skeleton with Lucian's proportions + dominant-bone binding (D3, D4). Done when: preview sheet shows no torn joints. Passed 2026-11-14 (`out/review/lucian/preview.png`)
 - [x] 8-bit palette quantise (D6). Masked materials are not handled yet: Lucian is opaque. Passed 2026-11-14
 - [x] MDL written directly with donor sequences, hitboxes, controllers, attachments, thumbnail (A9, D5, D7, D8). Done when: re-read is identical. Passed 2026-11-14
-- [ ] Pre-compile limit check + output tree (D9, A11). Done when: an over-budget fixture fails with a clear message before studiomdl runs
+- [x] Limit checks + output tree (D9, A11): bones, verts and normals per mesh, 4,080 tris per mesh, 20k tris, Sven 9k warning, D14 hitboxes, full portrait palette. Done when: `tests/convert.rs` passes. Passed 2026-11-14
+- [ ] Zero-error edge collapse with C3 locks (C1, C2, C3). Done when: a test mesh with coplanar splits loses only redundant triangles and its preview is pixel-identical
+- [ ] Spike: procedural sway for chain bones (D13, D15). Done when: D15 has a design with evidence
 - [x] G5 under A14: user reviewed `out/review/lucian/preview.png` and the thumbnail. Done when: user confirms. Confirmed 2026-11-14
 - [ ] Update `ARCHITECTURE.md` (D codes). Done when: sections B to J match the code
 

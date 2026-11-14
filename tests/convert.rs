@@ -67,6 +67,26 @@ fn lucian_converts() {
             .any(|b| b.name.starts_with("Index") || b.name.starts_with("Bip01 Tail"))
     );
 
+    // Hitboxes are the donor's set on kept bones (D14), same groups and order.
+    let kept: Vec<_> = donor
+        .hitboxes
+        .iter()
+        .filter(|h| {
+            m.bones
+                .iter()
+                .any(|b| b.name == donor.bones[h.bone as usize].name)
+        })
+        .collect();
+    assert_eq!(m.hitboxes.len(), kept.len());
+    for (ours, theirs) in m.hitboxes.iter().zip(&kept) {
+        assert_eq!(
+            m.bones[ours.bone as usize].name,
+            donor.bones[theirs.bone as usize].name
+        );
+        assert_eq!(ours.group, theirs.group);
+    }
+    assert!(m.textures.iter().all(|t| t.width <= 512 && t.height <= 512));
+
     // Faces wind the same way as the donor's, so the engine culls the right side.
     assert_eq!(preview::winding_sign(m), preview::winding_sign(&donor));
 

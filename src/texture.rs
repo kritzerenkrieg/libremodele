@@ -53,6 +53,16 @@ pub fn quantise(px: &[[u8; 3]], width: u32, height: u32) -> Indexed {
     } else {
         median_cut(counts.into_iter().collect(), 256)
     };
+    // Sven treats a portrait palette under 224 colours as a remap image (A11),
+    // so always fill all 256 entries with distinct colours.
+    let mut palette = palette;
+    let mut filler = (0..=255u8).flat_map(|r| [[r, r / 2, 255 - r], [255 - r, r, r / 3]]);
+    while palette.len() < 256 {
+        let c = filler.next().expect("enough filler colours");
+        if !palette.contains(&c) {
+            palette.push(c);
+        }
+    }
     let mut cache: HashMap<[u8; 3], u8> = HashMap::new();
     let pixels = px
         .iter()
@@ -177,6 +187,8 @@ mod tests {
         for (p, &i) in px.iter().zip(&q.pixels) {
             assert_eq!(q.palette[i as usize], *p);
         }
+        let distinct: std::collections::HashSet<_> = q.palette.iter().collect();
+        assert_eq!(distinct.len(), 256);
     }
 
     #[test]

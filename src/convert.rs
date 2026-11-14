@@ -20,10 +20,14 @@ use crate::preview::{bone_worlds, winding_sign};
 use crate::texture;
 use crate::vrm::Avatar;
 
-/// Working limits (A11 still open): HL SDK `studio.h`.
+/// Limits (A11): HL values, which Sven keeps except for textures.
 pub const MAX_BONES: usize = 128;
+/// Vertices, and separately normals, per mesh.
 pub const MAX_VERTS: usize = 2048;
+pub const MAX_TRIS_PER_MESH: usize = 4080;
 pub const MAX_TRIS: usize = 20000;
+/// Sven Co-op playermodel guidance (A11): warn above this.
+pub const SVEN_POLY_GUIDE: usize = 9000;
 /// D6: textures at most 512².
 pub const MAX_TEXTURE: u32 = 512;
 const FLATSHADE: i32 = 0x1;
@@ -105,6 +109,14 @@ fn chain_of(name: &str) -> Option<(&'static [&'static str], usize)> {
 
 pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
     let mut report = vec![format!("avatar: {:?}, licence {:?}", av.title, av.licence)];
+    // A13: warn, don't block.
+    let licence = av.licence.to_lowercase();
+    if licence.contains("prohibit") || licence.contains("disallow") || licence.is_empty() {
+        report.push(format!(
+            "warning: licence {:?} does not clearly allow redistribution; a server playermodel is downloaded by every client, so keep this output local (A6, A13)",
+            av.licence
+        ));
+    }
 
     // Clean (B3, B4): rules, then manifest overrides.
     let mut manifest = Vec::new();
@@ -519,6 +531,12 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
     if tris.len() > MAX_TRIS {
         bail!("{} triangles, over the {MAX_TRIS} limit", tris.len());
     }
+    if tris.len() > SVEN_POLY_GUIDE {
+        report.push(format!(
+            "warning: {} triangles, over Sven's ~{SVEN_POLY_GUIDE} playermodel guidance (A11)",
+            tris.len()
+        ));
+    }
 
     // Weld (C2) and fill bodyparts up to the vertex limit (D5).
     type Key = (usize, [i32; 3]);
@@ -547,7 +565,10 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
             .iter()
             .filter(|k| !cur.nmap.contains_key(&qkey(k.bone, k.n, nq)))
             .count();
-        if cur.verts.len() + new_v > MAX_VERTS || cur.norms.len() + new_n > MAX_VERTS {
+        if cur.verts.len() + new_v > MAX_VERTS
+            || cur.norms.len() + new_n > MAX_VERTS
+            || cur.tris.len() + 1 > MAX_TRIS_PER_MESH
+        {
             parts.push(Part::default());
         }
         let cur = parts.last_mut().unwrap();
@@ -629,7 +650,8 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
         })
         .collect();
 
-    // Hitboxes (D8): one per bone that carries vertices, from their bounds.
+    // Hitboxes (D14): the donor's set on the bones we keep. Bounds come from
+    // our vertices on that bone, or the donor's box scaled like the bone.
     let mut bounds: Vec<Option<(V3, V3)>> = vec![None; bones.len()];
     for bp in &bodyparts {
         for sm in &bp.models {
@@ -642,22 +664,33 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
             }
         }
     }
-    let hitboxes: Vec<Hitbox> = bounds
-        .iter()
-        .enumerate()
-        .filter_map(|(b, bb)| {
-            let (lo, hi) = (*bb)?;
-            let group = from_donor[b]
-                .and_then(|di| donor.hitboxes.iter().find(|h| h.bone == di as i32))
-                .map_or(0, |h| h.group);
-            Some(Hitbox {
-                bone: b as i32,
-                group,
-                bbmin: lo,
-                bbmax: hi,
-            })
-        })
-        .collect();
+    let mut hitboxes = Vec::new();
+    for h in &donor.hitboxes {
+        let di = h.bone as usize;
+        let Some(&nb) = donor_to_new.get(&di) else {
+            continue;
+        };
+        let (bbmin, bbmax) = bounds[nb].unwrap_or_else(|| {
+            let ds = donor.bones[di].scale[0];
+            let k = if ds.abs() > 0.0 {
+                bones[nb].scale[0] / ds
+            } else {
+                1.0
+            };
+            (mul(h.bbmin, k), mul(h.bbmax, k))
+        });
+        hitboxes.push(Hitbox {
+            bone: nb as i32,
+            group: h.group,
+            bbmin,
+            bbmax,
+        });
+    }
+    report.push(format!(
+        "hitboxes: {} of the donor's {} (D14)",
+        hitboxes.len(),
+        donor.hitboxes.len()
+    ));
 
     // Donor controllers and attachments, re-pointed (D8).
     let mut controller_map = HashMap::new();
