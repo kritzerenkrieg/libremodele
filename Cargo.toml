@@ -1,0 +1,9 @@
+[package]
+name = "libremodele"
+version = "0.1.0"
+edition = "2024"
+description = "Standalone converter from VRChat avatars to GoldSrc and Source playermodels"
+publish = false
+
+[dependencies]
+anyhow = "1"
