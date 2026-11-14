@@ -44,6 +44,7 @@ A phase starts only when its rows are Decided.
 | D11 | Triangle strips | Decided | **Build real strips and fans** (user, 2026-11-14). Lossless (C2), and gives a smaller download. **Result:** Lucian is 6,356 tris in 1,774 strips; the file shrank from 1.40 to 1.31 MB. Most of the rest is animation: each of the 56 bones has a 12-byte header in each of the 308 sequence blends. |
 | D12 | Normal welding precision | Decided | **Weld normals coarser** (~1°) for flatshade textures, to fit fewer bodyparts (user, 2026-11-14). **Result:** Lucian went from 3 bodyparts to 2 (2,018 + 1,439 verts). |
 | D13 | Chain animation | Decided | **Procedural sway** for avatar chains (user, 2026-11-14): generated per sequence from the root and parent motion. This needs a design spike before building (see D15). |
+| C8 | Near-lossless option | Question | Optional `--max-error <units>` reduction for heavy avatars (over Sven's 9k guidance), off by default so C2 stays the rule. Same C3 locks, but it allows collapses whose geometric error is under the cap. |
 | D14 | Hitbox set | Decided | **Copy the donor's hitbox set** for the bones we keep, with bounds rescaled to the avatar (user, 2026-11-14). Overrides the hitbox part of D8. |
 | D15 | Spike: procedural sway | Question | Inspect: how to drive chain bones per sequence (spring simulation over the parent bone's motion, run offline at conversion) and how to keep within GoldSrc's per-sequence animation data (u16 offsets). |
 | A12 | Licence of libremodele | Decided | **MIT** (user, 2026-11-14). |
@@ -65,7 +66,7 @@ A phase starts only when its rows are Decided.
 
 | Code | Topic | Status | Decision / Question |
 |---|---|---|---|
-| C1 | Decimator | Decided | **Our own zero-error edge collapse** in Rust (user, 2026-11-14): collapse only where the shape, bone and UVs are unchanged (C2), with the C3 locks. |
+| C1 | Decimator | Decided | **Our own zero-error edge collapse** in Rust (user, 2026-11-14): collapse only where the shape, bone and UVs are unchanged (C2), with the C3 locks. **Result 2026-11-14:** built (`src/reduce.rs`). Lucian loses 0 triangles: 1,154 vertices are on curved fans, 1,154 on seams or creases, 802 on bone boundaries, 219 on open borders and 11 have non-affine UVs. |
 | C2 | Stop rule | Decided | **Lossless reduction** (user, 2026-11-14): weld duplicates, drop degenerate and zero-area tris, and collapse only edges whose geometric error is ~0 (coplanar, same UVs, same bone). UV seams, open borders and bone boundaries are locked. The shape and texture mapping never change. |
 | C3 | Locked features | Decided | The conservative set, all four (user, 2026-11-14): **UV seams, open borders, bone boundaries, normal creases**. |
 | C4 | Per-target budgets | Decided | **No triangle budget** (user, 2026-11-14). Reduction is **lossless only**: see C2. Hard engine limits still apply; if a submodel goes past the verts-per-submodel limit, it is split into submodels (D5). |

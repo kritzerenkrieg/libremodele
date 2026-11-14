@@ -482,12 +482,7 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
 
     // Triangles with rigid bone binding (D3) in bone-local space.
     let flip = winding_sign(donor) < 0.0;
-    struct Corner {
-        bone: usize,
-        p: V3,
-        n: V3,
-        st: [i16; 2],
-    }
+    use crate::reduce::Vtx as Corner;
     let mut tris: Vec<[Corner; 3]> = Vec::new();
     let mut degenerate = 0;
     let mut bone_hits = vec![0usize; bones.len()];
@@ -527,6 +522,12 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
             tris.push(tri);
         }
     }
+    // Lossless edge collapse (C1, C2, C3).
+    let before_reduce = tris.len();
+    let (mut tris, kept_by) = crate::reduce::reduce_with_stats(&tris);
+    report.push(format!(
+        "edge collapse: vertices kept by rule {kept_by:?} (C3)"
+    ));
     tris.sort_by_key(|t| t[0].bone);
     if tris.len() > MAX_TRIS {
         bail!("{} triangles, over the {MAX_TRIS} limit", tris.len());
@@ -606,8 +607,9 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
     }
     let total_tris: usize = parts.iter().map(|p| p.tris.len()).sum();
     report.push(format!(
-        "triangles: {} in, {degenerate} zero-area and {welded_degenerate} collapsed by welding dropped, {total_tris} out; edge collapse not run (C1 open)",
-        kept.iter().map(|&i| av.parts[i].triangles.len()).sum::<usize>()
+        "triangles: {} in, {degenerate} zero-area and {welded_degenerate} collapsed by welding dropped, {total_tris} out; zero-error edge collapse {before_reduce} → {} (C1)",
+        kept.iter().map(|&i| av.parts[i].triangles.len()).sum::<usize>(),
+        tris.len()
     ));
 
     let bodyparts: Vec<Bodypart> = parts
