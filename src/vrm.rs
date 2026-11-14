@@ -69,6 +69,8 @@ pub struct Avatar {
     pub parts: Vec<Part>,
     /// Encoded image files (PNG) by image index.
     pub images: Vec<Vec<u8>>,
+    /// Reader notes for the report (FBX input, phase G).
+    pub notes: Vec<String>,
 }
 
 struct Glb {
@@ -293,6 +295,7 @@ pub fn load(bytes: &[u8]) -> Result<Avatar> {
         spring_groups,
         parts,
         images,
+        notes: Vec::new(),
     })
 }
 

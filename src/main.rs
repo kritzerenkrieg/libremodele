@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use libremodele::{convert, mdl, preview, sway, texture, vrm};
+use libremodele::{convert, fbx, mdl, preview, sway, texture, unitypkg, vrm};
 
 const USAGE: &str = "usage:
   libremodele convert <avatar.vrm> --donor <donor.mdl> --name <name> [--height <units>] [--max-tris <n>] [--manifest <clean_manifest.json>] [--out <dir>] [--sway]
+  libremodele convert <avatar.fbx> --licence <text> [--package <x.unitypackage>] [--variant <prefab>] (other flags as above)
   libremodele preview <file.mdl> <out.png>
   libremodele mdl-info <file.mdl>
   libremodele mdl-roundtrip <in.mdl> <out.mdl>";
@@ -88,8 +89,39 @@ fn convert_cmd(vrm_path: &str, rest: &[&str]) -> Result<()> {
         }
     }
 
-    let av = vrm::load(&std::fs::read(vrm_path).with_context(|| format!("reading {vrm_path}"))?)
-        .with_context(|| format!("parsing {vrm_path}"))?;
+    let bytes = std::fs::read(vrm_path).with_context(|| format!("reading {vrm_path}"))?;
+    let av = if vrm_path.to_lowercase().ends_with(".fbx") {
+        // Phase G (B9): FBX + optional Unity package; the licence is required (G7).
+        let licence = flag(rest, "--licence")
+            .context("--licence <text> is required for FBX input: an FBX carries none (G7, A6)")?;
+        let package = flag(rest, "--package")
+            .map(|p| {
+                unitypkg::Package::read(&std::fs::read(p).with_context(|| format!("reading {p}"))?)
+                    .with_context(|| format!("parsing {p}"))
+            })
+            .transpose()?;
+        let path = Path::new(vrm_path);
+        fbx::load(
+            &bytes,
+            &fbx::Load {
+                file_name: path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                title: path
+                    .file_stem()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                licence: licence.to_string(),
+                package: package.as_ref(),
+                variant: flag(rest, "--variant"),
+                dir: path.parent().and_then(Path::parent),
+            },
+        )
+    } else {
+        vrm::load(&bytes)
+    }
+    .with_context(|| format!("parsing {vrm_path}"))?;
     let donor = load(donor_path)?;
     let c = convert::convert(
         &av,

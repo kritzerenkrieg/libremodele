@@ -4,7 +4,7 @@ Planned work, in order. `DECISIONS.md` overrules this file wherever they disagre
 
 ```mermaid
 flowchart LR
-    A["Phase A<br/>Decisions and spikes"] --> B["Phase B<br/>Ingest and clean"] --> C["Phase C<br/>Reduce, atlas, bake"] --> D["Phase D<br/>GoldSrc back end"] --> E["Phase E<br/>Source back end"] --> F["Phase F<br/>Batch and review"] --> R
+    A["Phase A<br/>Decisions and spikes"] --> B["Phase B<br/>Ingest and clean"] --> C["Phase C<br/>Reduce, atlas, bake"] --> D["Phase D<br/>GoldSrc back end"] --> E["Phase E<br/>Source back end"] --> F["Phase F<br/>Batch and review"] --> G["Phase G<br/>FBX + Unity package"] --> R
     subgraph R["Cycle"]
         direction LR
         FT["Feature"] --> M["Maintenance"] --> FT
@@ -70,7 +70,8 @@ flowchart LR
 
 - [x] Miku (VRM, 65,737 tris, 191 bones, 4 images with alpha) converts: bone budget merges the deepest chain links (D2), one texture per (image, masked) with per-mesh normal runs (C5, D6), lossy QEM to the 20k default budget (C4, revised after the first in-game test showed a bald, broken face at 9k) with optimal placement, staged locks and layer clearance caps so skin can't move through the hair or over the eyes (C2, C8), deterministic output. Done when: `tests/convert.rs` `miku_converts` passes. Passed 2026-11-14
 - [x] Miku in game (Sven, local listen server, `miku` and `miku_sway`). Done when: user confirms. Confirmed 2026-11-15 after the C4/C8 fixes (first try at 9k failed: bald, broken face)
-- [ ] Neru and Gothic Doll: FBX only, blocked on B9 (FBX input, Question)
+- [x] Neru: FBX only, needs Phase G (B9, G1–G10 Decided) Converted and confirmed in game 2026-11-15
+- [ ] Third avatar: Gothic Doll turned out to be an outfit without its base doll (2026-11-15); the user picks another complete avatar
 
 ## Phase E: Source back end
 
@@ -92,6 +93,19 @@ flowchart LR
 - [ ] `avatar.toml` defaults + overrides (F3). Done when: per-avatar budget override reaches stage 3
 - [ ] Remote execution hook for heavy runs (A8). Done when: a batch can be sent to Kaggle/GPU server and results pulled back
 - [ ] Update `ARCHITECTURE.md` (F codes). Done when: sections B to J match the code
+
+## Phase G: FBX + Unity package input
+
+**Goal:** Neru (and Gothic Doll's outfit, as a decimation stress case) convert from FBX plus their `.unitypackage` (B9).
+**Exit:** both convert and pass the same checks as `miku_converts`; the user confirms both in game.
+
+- [x] Own binary FBX reader: nodes, mesh, UVs, normals, materials, skin clusters, bind pose, axes and units (B9, G6). Done when: a test reads both samples with the expected mesh/bone/poly counts Passed 2026-11-15 (`neru_converts`, `gothic_reads`)
+- [x] Unitypackage reader: GUID → path, `.mat` colour/texture, prefab renderer materials, textures by name (B9, G2, G4). Done when: a test lists Gothic's materials per mesh Passed 2026-11-15 (`gothic_reads`)
+- [x] Bone-name humanoid mapping and colour swatch texture (G1, G3). Done when: both samples map every required bone (test) Passed 2026-11-15 (Neru via Unity's map, G10; Gothic by name, 19 bones)
+- [x] PhysBone → sway (G5, D15). Done when: Gothic `--sway` reports swaying strands per the strand rule Passed 2026-11-15 (8 ribbon bones sway; 12 joined skirt strands static)
+- [x] `convert` takes FBX + package + `--licence` (G7). Done when: `neru_converts` passes and Gothic's outfit reaches the 20k budget (C9) Passed 2026-11-15 (Gothic 184,598 → 20,000 in ~3.5 min, G8)
+- [x] Neru in game. Done when: user confirms Confirmed 2026-11-15
+- [ ] Update `ARCHITECTURE.md` (G codes). Done when: sections B to J match the code
 
 ## Cycle: feature and maintenance
 

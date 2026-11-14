@@ -480,6 +480,71 @@ fn plan(m: &Mesh, q: &[Quad], u: usize, v: usize, stage: u8) -> Option<Plan> {
     })
 }
 
+/// Cuts edges shared by three or more triangles (fins, frills welded onto a
+/// body) so each sheet has its own vertices there: the cut becomes a border
+/// that can slide at stage 2 instead of locking every vertex it touches.
+/// Returns each vertex's original id.
+fn split_fins(m: &mut Mesh) -> Vec<usize> {
+    let mut count: HashMap<(usize, usize), u32> = HashMap::new();
+    for t in m.tris.iter().flatten() {
+        for k in 0..3 {
+            let (a, b) = (t[k].0, t[(k + 1) % 3].0);
+            *count.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+    }
+    let cut = |a: usize, b: usize| count.get(&(a.min(b), a.max(b))).is_some_and(|&c| c > 2);
+    let mut origin: Vec<usize> = (0..m.pos.len()).collect();
+    let mut touched: Vec<usize> = count
+        .iter()
+        .filter(|(_, c)| **c > 2)
+        .flat_map(|((a, b), _)| [*a, *b])
+        .collect();
+    touched.sort_unstable();
+    touched.dedup();
+    for u in touched {
+        let around = m.inc[u].clone();
+        let mut root: Vec<usize> = (0..around.len()).collect();
+        fn find(r: &mut [usize], mut x: usize) -> usize {
+            while r[x] != x {
+                r[x] = r[r[x]];
+                x = r[x];
+            }
+            x
+        }
+        for i in 0..around.len() {
+            for j in i + 1..around.len() {
+                let (ti, tj) = (m.tris[around[i]].unwrap(), m.tris[around[j]].unwrap());
+                if ti
+                    .iter()
+                    .any(|a| a.0 != u && !cut(u, a.0) && tj.iter().any(|b| b.0 == a.0))
+                {
+                    let (ri, rj) = (find(&mut root, i), find(&mut root, j));
+                    root[ri.max(rj)] = ri.min(rj);
+                }
+            }
+        }
+        let mut new_id: HashMap<usize, usize> = HashMap::new();
+        for (i, &t) in around.iter().enumerate() {
+            let r = find(&mut root, i);
+            if r == find(&mut root, 0) {
+                continue;
+            }
+            let id = *new_id.entry(r).or_insert_with(|| {
+                m.pos.push(m.pos[u]);
+                m.inc.push(Vec::new());
+                origin.push(origin[u]);
+                m.pos.len() - 1
+            });
+            let mut tri = m.tris[t].unwrap();
+            tri.iter_mut().filter(|x| x.0 == u).for_each(|x| x.0 = id);
+            m.tris[t] = Some(tri);
+            m.inc[id].push(t);
+            m.inc[u].retain(|&x| x != t);
+        }
+    }
+    origin
+}
+
 /// Whether the triangles around `u` form one edge-connected fan.
 fn one_fan(m: &Mesh, u: usize, around: &[usize]) -> bool {
     let others = |t: usize| -> Vec<usize> {
@@ -566,8 +631,9 @@ pub fn decimate(input: &[[Vtx; 3]], target: usize) -> (Vec<[Vtx; 3]>, Stats) {
     };
 
     let layers = Layers::new(&m.pos, &m.tris);
+    let origin = split_fins(&mut m);
     let mut cap: Vec<f64> = (0..m.pos.len())
-        .map(|x| f64::from(layers.gap(m.pos[x], layers.piece[x])))
+        .map(|x| f64::from(layers.gap(m.pos[x], layers.piece[origin[x]])))
         .collect();
     stats.near_layers = cap.iter().filter(|c| c.is_finite()).count();
 
@@ -682,7 +748,7 @@ pub fn decimate(input: &[[Vtx; 3]], target: usize) -> (Vec<[Vtx; 3]>, Stats) {
                         mid(ps[1], ps[2]),
                         mid(ps[2], ps[0]),
                     ];
-                    let own = layers.piece[nc[0].0];
+                    let own = layers.piece[origin[nc[0].0]];
                     blocked = samples
                         .iter()
                         .any(|&sp| f64::from(layers.gap(sp, own)) < gap * (1.0 - share));

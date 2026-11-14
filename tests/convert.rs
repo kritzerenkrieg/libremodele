@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use libremodele::{convert, mdl, preview, sway, vrm};
+use libremodele::{convert, fbx, mdl, preview, sway, unitypkg, vrm};
 
 fn sample(rel: &str) -> Option<Vec<u8>> {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -191,4 +191,110 @@ fn miku_converts() {
     // Deterministic: the same input gives the same model.
     let again = convert::convert(&av, &donor, &opts).unwrap();
     assert_eq!(again.model, *m);
+}
+
+/// Neru: FBX + Unity package (phase G, B9): Unity humanoid map (G10), FBX
+/// materials (G2, scene overrides skipped, G9), flat colours in one swatch
+/// texture (G3). Local fixture only (A6, G7).
+#[test]
+fn neru_converts() {
+    let (Some(f), Some(pk), Some(d)) = (
+        sample("neru/Zako Neru 2.0/FBX/zako.fbx"),
+        sample("neru/Zako Neru 2.0/Unitypackage/Zako Neru.unitypackage"),
+        sample("yuki_ref/models/player/yuki_muumuyu/yuki_muumuyu.mdl"),
+    ) else {
+        return;
+    };
+    let pkg = unitypkg::Package::read(&pk).unwrap();
+    let av = fbx::load(
+        &f,
+        &fbx::Load {
+            file_name: "zako.fbx".into(),
+            title: "zako".into(),
+            licence: "local fixture".into(),
+            package: Some(&pkg),
+            variant: None,
+            dir: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(av.humanoid.len(), 51);
+    assert_eq!(av.parts.len(), 23);
+    // Feet on the ground, head about 1.2 m up: axes and units (G6).
+    let ys = av.parts.iter().flat_map(|p| &p.positions).map(|p| p[1]);
+    let (lo, hi) = ys.fold((f32::MAX, f32::MIN), |(a, b), y| (a.min(y), b.max(y)));
+    assert!(lo.abs() < 0.02 && (hi - 1.2).abs() < 0.05, "{lo} {hi}");
+    let donor = mdl::read(&d).unwrap();
+    let opts = convert::Options {
+        name: "neru".into(),
+        height: None,
+        keep: HashMap::new(),
+        max_tris: None,
+    };
+    let c = convert::convert(&av, &donor, &opts).unwrap();
+    let m = &c.model;
+    assert!(
+        m.tri_count() <= 20000 && m.tri_count() > 19500,
+        "{}",
+        m.tri_count()
+    );
+    // The sweater texture and the swatch.
+    assert_eq!(m.textures.len(), 2);
+    for sm in m.bodyparts.iter().flat_map(|b| &b.models) {
+        assert!(sm.verts.len() <= convert::MAX_VERTS && sm.norms.len() <= convert::MAX_VERTS);
+    }
+    assert_eq!(mdl::read(&mdl::write(m).unwrap()).unwrap(), *m);
+    let again = convert::convert(&av, &donor, &opts).unwrap();
+    assert_eq!(again.model, *m);
+}
+
+/// Gothic Doll's outfit: an unpacked prefab gives `.mat` materials per
+/// renderer (G2), the default variant is the first by name (G4), bones map by
+/// name (G1) and PhysBones become spring groups (G5). Read only: it is an
+/// outfit without its base doll, so it isn't converted here. Local fixture (A6).
+#[test]
+fn gothic_reads() {
+    let (Some(f), Some(pk)) = (
+        sample("gothic/Gothic Doll/FBX/Gothic Doll.fbx"),
+        sample("gothic/Gothic Doll/Gothic Doll.unitypackage"),
+    ) else {
+        return;
+    };
+    let pkg = unitypkg::Package::read(&pk).unwrap();
+    let s = unitypkg::settings(&pkg, "Gothic Doll.fbx", None).unwrap();
+    assert!(s.human.is_empty());
+    assert_eq!(s.physbones.len(), 16);
+    let mut mats: Vec<(String, Vec<String>)> = s
+        .renderer_materials
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                v.iter().map(|m| m.as_ref().unwrap().name.clone()).collect(),
+            )
+        })
+        .collect();
+    mats.sort();
+    assert_eq!(mats.len(), 6);
+    // The default (black) variant has no white.mat.
+    assert!(
+        mats.iter().flat_map(|(_, v)| v).all(|m| m != "white.mat"),
+        "{mats:?}"
+    );
+    let av = fbx::load(
+        &f,
+        &fbx::Load {
+            file_name: "Gothic Doll.fbx".into(),
+            title: "Gothic Doll".into(),
+            licence: "local fixture".into(),
+            package: Some(&pkg),
+            variant: None,
+            dir: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(av.parts.len(), 14);
+    assert_eq!(av.humanoid.len(), 19);
+    assert_eq!(av.spring_groups.len(), 16);
+    assert!(av.parts.iter().all(|p| p.image.is_some()));
 }

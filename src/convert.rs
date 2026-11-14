@@ -113,6 +113,7 @@ fn chain_of(name: &str) -> Option<(&'static [&'static str], usize)> {
 
 pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
     let mut report = vec![format!("avatar: {:?}, licence {:?}", av.title, av.licence)];
+    report.extend(av.notes.iter().cloned());
     // A13: warn, don't block.
     let licence = av.licence.to_lowercase();
     if licence.contains("prohibit") || licence.contains("disallow") || licence.is_empty() {
