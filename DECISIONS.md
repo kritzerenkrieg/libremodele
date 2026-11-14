@@ -31,7 +31,7 @@ A phase starts only when its rows are Decided.
 | A2 | Targets | Decided | GoldSrc first; **Source (Phase E) starts once GoldSrc is hardened**: a second avatar converts cleanly and the open C rows are settled (user, 2026-11-14). |
 | A3 | Which Source game | Decided | **GMod first; other Source games later**, each as its own Question row (user, 2026-11-14). |
 | A4 | Which GoldSrc game | Decided | **Sven Co-op** first (user, 2026-11-14). Evidence: yuki_ref has the 192-sequence Sven player set. |
-| A5 | Input formats | Decided | v1 reads **VRM** only (user accepted the proposal, 2026-11-14). Earlier note: **Evidence (lucian):** the download ships `.blend`, `.fbx`, `.unitypackage` and `.vrm` together. The VRM is 0.x, with a full humanoid map (53 bones), 3 spring-bone groups and 14 blendshape groups. Proposal: the first run uses the VRM, so AssetRipper isn't needed yet. VRChat avatars arrive as (a) a Unity package / project with FBX + prefab, (b) an AssetBundle, which needs AssetRipper, or (c) VRM (glTF 2.0, humanoid map built in, no ripping needed). Support all three, with everything normalised to one glTF + humanoid-map file at the end of stage 1? |
+| A5 | Input formats | Decided | v1 reads **VRM** only (user accepted the proposal, 2026-11-14). Earlier note: **Evidence (lucian):** the download ships `.blend`, `.fbx`, `.unitypackage` and `.vrm` together. The VRM is 0.x, with a full humanoid map (53 bones), 3 spring-bone groups and 14 blendshape groups. Proposal: the first run uses the VRM, so AssetRipper isn't needed yet. VRChat avatars arrive as (a) a Unity package / project with FBX + prefab, (b) an AssetBundle, which needs AssetRipper, or (c) VRM (glTF 2.0, humanoid map built in, no ripping needed). Support all three, with everything normalised to one glTF + humanoid-map file at the end of stage 1? **Extended 2026-11-15 by B9:** FBX + Unity package input comes in phase G. |
 | A6 | Source rights | Decided | Lucian (`Redistribution_Prohibited`, no commercial use) is a **local test fixture only**: its output stays in `out/` and never goes to a server or FastDL (user, 2026-11-14). The same applies to yuki_ref (model by Yuki, anims by TapChan). Whether to make the `licence` field mandatory for all avatars is still open: see A13. |
 | A7 | Language and app form | Decided | **Rust**, one binary with its libraries compiled in. **CLI first**; a Tauri GUI comes in a later phase (user, 2026-11-14). |
 | A8 | Compute location | Decided | **Local is fine**: Lucian converts in 0.2 s. The global rule still applies, so any heavy job goes remote (user, 2026-11-14). |
@@ -54,7 +54,7 @@ A phase starts only when its rows are Decided.
 
 | Code | Topic | Status | Decision / Question |
 |---|---|---|---|
-| B1 | Extract tool | Decided | v1 reads **VRM / glb**; no AssetRipper (user accepted the proposal, 2026-11-14). Earlier note: AssetRipper is a separate app, so it conflicts with A1. Proposal: v1 reads **VRM / glb** (and FBX later). Unity bundles/packages stay a manual step outside the app for now. |
+| B1 | Extract tool | Decided | v1 reads **VRM / glb**; no AssetRipper (user accepted the proposal, 2026-11-14). Earlier note: AssetRipper is a separate app, so it conflicts with A1. Proposal: v1 reads **VRM / glb** (and FBX later). Unity bundles/packages stay a manual step outside the app for now. **Extended 2026-11-15 by B9:** FBX + Unity package input comes in phase G. |
 | B2 | Interchange format | Decided | Superseded by A1: one binary, stages pass data in memory; review files (`clean_manifest.json`, `preview.png`, `report.txt`) are the only stage outputs (user, 2026-11-14). |
 | B3 | What "clean" deletes | Decided | **Rules only** for v1 (user, 2026-11-14): weld, drop degenerate tris, drop meshes VRM marks first-person-only, and drop eye-highlight shells by name. |
 | B4 | Detection: rules + manifest | Decided | Rule results go to an editable `clean_manifest.json` (user, 2026-11-14). |
@@ -62,7 +62,7 @@ A phase starts only when its rows are Decided.
 | B6 | Outfit / toggles | Decided | **Default outfit only**: parts that are on by default (user, 2026-11-14). Sven forbids swappable bodies anyway (A11). |
 | B7 | Blendshapes | Decided | Bake the **neutral** face, with all blendshapes at 0, for GoldSrc (user, 2026-11-14). Source flexes are still open for Phase E. |
 | B8 | Units and scale | Decided | Height is a **setting** (user, 2026-11-14). The default **matches the donor skeleton** (yuki_ref), so animations, hitboxes and eye height line up. |
-| B9 | FBX input | Question | Raised 2026-11-14 by the user's Neru and Gothic Doll samples, which ship only FBX + Unity package (+ .blend), no VRM. Most VRChat avatars are distributed this way. Proposal for its own phase: an own binary FBX reader (A1), humanoid mapping by bone name, spring settings from the Unity package's PhysBone components. Would revise A5/B1. User: "do Miku first, FBX later". |
+| B9 | FBX input | Decided | **FBX + Unity package** (user, 2026-11-15), as new phase G. Our own binary FBX reader (A1: mesh, skin weights, skeleton, UVs). The `.unitypackage` (tar.gz) supplies textures, materials and PhysBone settings for sway (D15), and the humanoid mapping if its import settings carry one, else mapping by bone name. Raised by Neru and Gothic Doll, which ship only FBX + Unity package. Revises A5/B1. |
 
 ## C: Reduce, atlas, bake
 
