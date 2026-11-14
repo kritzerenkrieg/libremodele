@@ -41,8 +41,8 @@ A phase starts only when its rows are Decided.
 | A13 | Mandatory licence field | Question | Should every avatar need a `licence` entry in `avatar.toml` before output, with the VRM meta read automatically where present? |
 | A14 | Verifying without the game | Decided | **Own checks only**: libremodele re-reads its output and renders previews (rest pose and frames from the donor animations). There is no in-game or HLAM step. Gate G5 becomes "re-read and preview pass" (user, 2026-11-14). |
 | D10 | Texture render flag | Decided | **Flatshade** (0x1) for unlit/toon materials, the same as yuki_ref (user, 2026-11-14). |
-| D11 | Triangle strips | Decided | **Build real strips and fans** (user, 2026-11-14). Lossless (C2), and gives a smaller download. |
-| D12 | Normal welding precision | Decided | **Weld normals coarser** (~1°) for flatshade textures, to fit fewer bodyparts (user, 2026-11-14). |
+| D11 | Triangle strips | Decided | **Build real strips and fans** (user, 2026-11-14). Lossless (C2), and gives a smaller download. **Result:** Lucian is 6,356 tris in 1,774 strips; the file shrank from 1.40 to 1.31 MB. Most of the rest is animation: each of the 56 bones has a 12-byte header in each of the 308 sequence blends. |
+| D12 | Normal welding precision | Decided | **Weld normals coarser** (~1°) for flatshade textures, to fit fewer bodyparts (user, 2026-11-14). **Result:** Lucian went from 3 bodyparts to 2 (2,018 + 1,439 verts). |
 | D13 | Chain animation | Question | Lucian's hair, ear and dress chains are static bones (D2). The donor's own hair bones were animated (`Bip01 Hair1-3` in 134 sequences). Copy the donor's hair motion onto the avatar's hair chains later? |
 | A12 | Licence of libremodele | Question | Licence of this repo (e.g. MIT, as FastDLX uses). Tools it calls (AssetRipper GPL-3, Blender GPL, meshoptimizer MIT, MeshLab GPL) are invoked as separate programs and not bundled. Is that OK? |
 

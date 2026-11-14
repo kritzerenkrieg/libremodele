@@ -15,7 +15,7 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use crate::math::{M3, V3, Xf, cross, dot, len, mul, norm, sub};
-use crate::mdl::{Bodypart, Bone, Hitbox, Mesh, Model, SubModel, Texture, TriCmd};
+use crate::mdl::{Bodypart, Bone, Hitbox, Mesh, Model, SubModel, Texture};
 use crate::preview::{bone_worlds, winding_sign};
 use crate::texture;
 use crate::vrm::Avatar;
@@ -530,8 +530,10 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
         norms: Vec<V3>,
         norm_bones: Vec<u8>,
         nmap: HashMap<Key, i16>,
-        cmds: Vec<TriCmd>,
+        tris: Vec<[[i16; 4]; 3]>,
     }
+    // D12: flatshade ignores most of the normal, so weld normals within ~1°.
+    let nq = if unlit { 57.3 } else { 1e3 };
     let qkey = |b: usize, v: V3, s: f32| (b, v.map(|x| (x * s).round() as i32));
     let mut parts: Vec<Part> = vec![Part::default()];
     let mut welded_degenerate = 0;
@@ -543,7 +545,7 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
             .count();
         let new_n = t
             .iter()
-            .filter(|k| !cur.nmap.contains_key(&qkey(k.bone, k.n, 1e3)))
+            .filter(|k| !cur.nmap.contains_key(&qkey(k.bone, k.n, nq)))
             .count();
         if cur.verts.len() + new_v > MAX_VERTS || cur.norms.len() + new_n > MAX_VERTS {
             parts.push(Part::default());
@@ -562,7 +564,7 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
                     i
                 }
             };
-            let nk = qkey(k.bone, k.n, 1e3);
+            let nk = qkey(k.bone, k.n, nq);
             let ni = match cur.nmap.get(&nk) {
                 Some(&i) => i,
                 None => {
@@ -579,12 +581,9 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
             welded_degenerate += 1;
             continue;
         }
-        cur.cmds.push(TriCmd {
-            fan: false,
-            verts: cmd,
-        });
+        cur.tris.push([cmd[0], cmd[1], cmd[2]]);
     }
-    let total_tris: usize = parts.iter().map(|p| p.cmds.len()).sum();
+    let total_tris: usize = parts.iter().map(|p| p.tris.len()).sum();
     report.push(format!(
         "triangles: {} in, {degenerate} zero-area and {welded_degenerate} collapsed by welding dropped, {total_tris} out; edge collapse not run (C1 open)",
         kept.iter().map(|&i| av.parts[i].triangles.len()).sum::<usize>()
@@ -599,11 +598,13 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
             } else {
                 format!("body{}", i + 1)
             };
+            let commands = crate::strip::strips(&p.tris);
             report.push(format!(
-                "bodypart {name}: {} verts, {} normals, {} triangles",
+                "bodypart {name}: {} verts, {} normals, {} triangles in {} strips",
                 p.verts.len(),
                 p.norms.len(),
-                p.cmds.len()
+                p.tris.len(),
+                commands.len()
             ));
             Bodypart {
                 name: name.clone(),
@@ -617,11 +618,11 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
                     norm_bones: p.norm_bones,
                     norms: p.norms,
                     meshes: vec![Mesh {
-                        num_tris: p.cmds.len() as i32,
+                        num_tris: p.tris.len() as i32,
                         skinref: 0,
                         num_norms: p.nmap.len() as i32,
                         norm_index: 0,
-                        commands: p.cmds,
+                        commands,
                     }],
                 }],
             }
