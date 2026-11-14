@@ -53,7 +53,7 @@ flowchart LR
 ## Phase D: GoldSrc back end
 
 **Goal:** fixture becomes a working HL1 (or A4 target) server playermodel.
-**Exit:** model loads in HLAM and on a local listen server, playing the stock animations.
+**Exit:** model loads in HLAM and on a local listen server, playing the stock animations. **Met 2026-11-14** in Sven Co-op (A4) on a local listen server, via `svencoop_addon/` (HLAM not used, A14): menu and portrait, idle/run/crouch/jump/aim/death, height and facing, and `--sway` (ears and front hair swing, dress solid) all confirmed by the user, no issues.
 
 - [x] Bone map humanoid → Bip01; fingers/toes/eyes merged; hair/ear/dress chains kept (D1, D2). Done when: test checks chains present, fingers and donor extras absent. Passed 2026-11-14
 - [x] Retarget to the donor skeleton with Lucian's proportions + dominant-bone binding (D3, D4). Done when: preview sheet shows no torn joints. Passed 2026-11-14 (`out/review/lucian/preview.png`)
@@ -63,7 +63,7 @@ flowchart LR
 - [x] Zero-error edge collapse with C3 locks (C1, C2, C3). Done when: unit tests show a flat grid reduced to its border with the same area and UVs, bone halves never merged, and folds and seams blocked. Passed 2026-11-14. Lucian: 0 of 3,340 vertices removable (already minimal); the report lists which rule kept each vertex
 - [x] Spike: procedural sway for chain bones (D13, D15). Done when: D15 has a design with evidence. Passed 2026-11-14 (Option A chosen)
 - [x] Optional chain sway, UniVRM spring port (D13, D15, D16). Done when: `--sway` adds sway within every sequence's 64 KB budget, body channels unchanged, re-read identical (`tests/convert.rs`), and frame strips show no tearing. Passed 2026-11-14: Lucian 10 bones, 192/192 sequences, +0.51 MB
-- [x] G5 under A14: user reviewed `out/review/lucian/preview.png` and the thumbnail. Done when: user confirms. Confirmed 2026-11-14
+- [x] G5 under A14: user reviewed `out/review/lucian/preview.png` and the thumbnail. Done when: user confirms. Confirmed 2026-11-14; in-game check passed the same day
 - [x] Update `ARCHITECTURE.md` (D codes). Done when: sections B to J match the code. Passed 2026-11-14 (full rewrite to the standalone Rust design; Source back end marked planned)
 
 ## Phase E: Source back end
