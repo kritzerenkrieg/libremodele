@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use libremodele::{convert, mdl, preview, texture, vrm};
+use libremodele::{convert, mdl, preview, sway, texture, vrm};
 
 const USAGE: &str = "usage:
-  libremodele convert <avatar.vrm> --donor <donor.mdl> --name <name> [--height <units>] [--manifest <clean_manifest.json>] [--out <dir>]
+  libremodele convert <avatar.vrm> --donor <donor.mdl> --name <name> [--height <units>] [--manifest <clean_manifest.json>] [--out <dir>] [--sway]
   libremodele preview <file.mdl> <out.png>
   libremodele mdl-info <file.mdl>
   libremodele mdl-roundtrip <in.mdl> <out.mdl>";
@@ -96,7 +96,32 @@ fn convert_cmd(vrm_path: &str, rest: &[&str]) -> Result<()> {
             keep,
         },
     )?;
+    let mut c = c;
+    let mut size_note = None;
+    if rest.contains(&"--sway") {
+        // D16: off by default; D15: UniVRM spring port within each sequence's budget.
+        let before = mdl::write(&c.model)?.len();
+        let t = std::time::Instant::now();
+        let sum = sway::apply(&mut c.model, &c.rig)?;
+        c.report.push(format!(
+            "sway (D15): {} chain bones in {} groups; {} sequences fully swaying, {} partly (budget), {} static; {:.1} s",
+            c.rig.chains.len(),
+            c.rig.groups.len(),
+            sum.full,
+            sum.partial,
+            sum.none,
+            t.elapsed().as_secs_f32()
+        ));
+        size_note = Some(before);
+    }
     let bytes = mdl::write(&c.model)?;
+    if let Some(before) = size_note {
+        c.report.push(format!(
+            "sway: +{} bytes ({:.2} MB)",
+            bytes.len() - before,
+            (bytes.len() - before) as f64 / 1e6
+        ));
+    }
 
     // G5 under A14: our own re-read must give back exactly what we built.
     let again = mdl::read(&bytes).context("re-reading the written model")?;

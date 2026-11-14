@@ -61,7 +61,8 @@ flowchart LR
 - [x] MDL written directly with donor sequences, hitboxes, controllers, attachments, thumbnail (A9, D5, D7, D8). Done when: re-read is identical. Passed 2026-11-14
 - [x] Limit checks + output tree (D9, A11): bones, verts and normals per mesh, 4,080 tris per mesh, 20k tris, Sven 9k warning, D14 hitboxes, full portrait palette. Done when: `tests/convert.rs` passes. Passed 2026-11-14
 - [x] Zero-error edge collapse with C3 locks (C1, C2, C3). Done when: unit tests show a flat grid reduced to its border with the same area and UVs, bone halves never merged, and folds and seams blocked. Passed 2026-11-14. Lucian: 0 of 3,340 vertices removable (already minimal); the report lists which rule kept each vertex
-- [ ] Spike: procedural sway for chain bones (D13, D15). Done when: D15 has a design with evidence
+- [x] Spike: procedural sway for chain bones (D13, D15). Done when: D15 has a design with evidence. Passed 2026-11-14 (Option A chosen)
+- [x] Optional chain sway, UniVRM spring port (D13, D15, D16). Done when: `--sway` adds sway within every sequence's 64 KB budget, body channels unchanged, re-read identical (`tests/convert.rs`), and frame strips show no tearing. Passed 2026-11-14: Lucian 10 bones, 192/192 sequences, +0.51 MB
 - [x] G5 under A14: user reviewed `out/review/lucian/preview.png` and the thumbnail. Done when: user confirms. Confirmed 2026-11-14
 - [ ] Update `ARCHITECTURE.md` (D codes). Done when: sections B to J match the code
 

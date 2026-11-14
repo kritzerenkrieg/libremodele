@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use libremodele::{convert, mdl, preview, vrm};
+use libremodele::{convert, mdl, preview, sway, vrm};
 
 fn sample(rel: &str) -> Option<Vec<u8>> {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -110,4 +110,36 @@ fn lucian_converts() {
     let h =
         zs.iter().cloned().fold(f32::MIN, f32::max) - zs.iter().cloned().fold(f32::MAX, f32::min);
     assert!((h - 54.65).abs() < 1.0, "height {h}");
+
+    // Sway (D15, D16): every chain bone in a spring group, every sequence
+    // written within its 64 KB budget, and the result reads back unchanged.
+    // Strands sharing triangles (dress panels, back hair) stay static; separate ones sway.
+    let swaying: Vec<&str> = c
+        .rig
+        .chains
+        .iter()
+        .map(|ch| m.bones[ch.0].name.as_str())
+        .collect();
+    assert!(
+        swaying.iter().all(|n| !n.starts_with("Dress")),
+        "{swaying:?}"
+    );
+    assert!(
+        swaying.contains(&"FHair1") && swaying.contains(&"Ear1.L"),
+        "{swaying:?}"
+    );
+    let mut swayed = c.model.clone();
+    let sum = sway::apply(&mut swayed, &c.rig).unwrap();
+    assert_eq!(sum.full + sum.partial + sum.none, swayed.sequences.len());
+    assert!(sum.full > 150, "{} fully swaying", sum.full);
+    let bytes = mdl::write(&swayed).unwrap();
+    assert_eq!(mdl::read(&bytes).unwrap(), swayed);
+    // Body bones are untouched.
+    for (a, b) in m.sequences.iter().zip(&swayed.sequences) {
+        for (bi, bone) in m.bones.iter().enumerate() {
+            if !c.rig.chains.iter().any(|ch| ch.0 == bi) {
+                assert_eq!(a.blends[0][bi], b.blends[0][bi], "{}", bone.name);
+            }
+        }
+    }
 }

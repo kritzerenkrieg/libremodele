@@ -32,6 +32,28 @@ pub struct Part {
     pub first_person_only: bool,
 }
 
+/// A sphere collider: `offset` in the node's local space (metres).
+#[derive(Clone, Debug)]
+pub struct Collider {
+    pub node: usize,
+    pub offset: V3,
+    pub radius: f32,
+}
+
+/// One VRM 0.x spring-bone group, as UniVRM uses it.
+#[derive(Clone, Debug)]
+pub struct SpringGroup {
+    pub name: String,
+    pub stiffness: f32,
+    pub gravity_power: f32,
+    /// glTF space.
+    pub gravity_dir: V3,
+    pub drag: f32,
+    pub hit_radius: f32,
+    pub roots: Vec<usize>,
+    pub colliders: Vec<Collider>,
+}
+
 pub struct Avatar {
     pub title: String,
     pub licence: String,
@@ -40,6 +62,8 @@ pub struct Avatar {
     pub humanoid: HashMap<String, usize>,
     /// Nodes in spring-bone chains (roots and their descendants).
     pub spring: HashSet<usize>,
+    /// VRM 0.x spring-bone groups with their settings (D15).
+    pub spring_groups: Vec<SpringGroup>,
     pub parts: Vec<Part>,
     /// Encoded image files (PNG) by image index.
     pub images: Vec<Vec<u8>>,
@@ -104,12 +128,58 @@ pub fn load(bytes: &[u8]) -> Result<Avatar> {
     }
 
     let mut spring = HashSet::new();
+    let mut spring_groups = Vec::new();
+    let colliders: Vec<Vec<Collider>> = vrm
+        .pointer("/secondaryAnimation/colliderGroups")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|cg| {
+            let node = cg.get("node").and_then(Value::as_u64).unwrap_or(0) as usize;
+            cg.get("colliders")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|c| Collider {
+                    node,
+                    offset: xyz(c.get("offset")),
+                    radius: c.get("radius").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                })
+                .collect()
+        })
+        .collect();
     for g in vrm
         .pointer("/secondaryAnimation/boneGroups")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
     {
+        let num = |k: &str, d: f64| g.get(k).and_then(Value::as_f64).unwrap_or(d) as f32;
+        let mut group = SpringGroup {
+            name: g
+                .get("comment")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            // UniVRM 0.x spells it "stiffiness".
+            stiffness: num("stiffiness", 1.0),
+            gravity_power: num("gravityPower", 0.0),
+            gravity_dir: xyz(g.get("gravityDir")),
+            drag: num("dragForce", 0.4),
+            hit_radius: num("hitRadius", 0.02),
+            roots: Vec::new(),
+            colliders: Vec::new(),
+        };
+        for ci in g
+            .get("colliderGroups")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(cs) = ci.as_u64().and_then(|i| colliders.get(i as usize)) {
+                group.colliders.extend(cs.iter().cloned());
+            }
+        }
         for b in g
             .get("bones")
             .and_then(Value::as_array)
@@ -118,6 +188,7 @@ pub fn load(bytes: &[u8]) -> Result<Avatar> {
         {
             if let Some(b) = b.as_u64() {
                 let b = b as usize;
+                group.roots.push(b);
                 for (i, _) in nodes.iter().enumerate() {
                     if is_descendant(i, b, &parent) {
                         spring.insert(i);
@@ -125,6 +196,7 @@ pub fn load(bytes: &[u8]) -> Result<Avatar> {
                 }
             }
         }
+        spring_groups.push(group);
     }
 
     let mut first_person_only = HashSet::new();
@@ -215,9 +287,19 @@ pub fn load(bytes: &[u8]) -> Result<Avatar> {
         nodes,
         humanoid,
         spring,
+        spring_groups,
         parts,
         images,
     })
+}
+
+fn xyz(v: Option<&Value>) -> V3 {
+    let f = |k: &str| {
+        v.and_then(|v| v.get(k))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0) as f32
+    };
+    [f("x"), f("y"), f("z")]
 }
 
 fn arr<'a>(j: &'a Value, k: &str) -> Result<&'a Vec<Value>> {

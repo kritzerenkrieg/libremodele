@@ -7,5 +7,6 @@ pub mod mdl;
 pub mod preview;
 pub mod reduce;
 pub mod strip;
+pub mod sway;
 pub mod texture;
 pub mod vrm;

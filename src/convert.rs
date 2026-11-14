@@ -95,6 +95,8 @@ pub struct Converted {
     pub model: Model,
     pub manifest: Value,
     pub report: Vec<String>,
+    /// Chain bones and spring parameters for optional sway (D15, D16).
+    pub rig: crate::sway::Rig,
 }
 
 fn is_standard(name: &str) -> bool {
@@ -444,6 +446,55 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
     if bones.len() > MAX_BONES {
         bail!("{} bones, over the {MAX_BONES} limit", bones.len());
     }
+    // Sway rig (D15): each chain bone joins the spring group whose root it
+    // descends from; colliders go into their bone's local frame.
+    // Strand of a chain bone: (group, root node it hangs from).
+    let strand_of = |mut n: usize| loop {
+        if let Some(g) = av.spring_groups.iter().position(|g| g.roots.contains(&n)) {
+            return Some((g, n));
+        }
+        n = av.nodes[n].parent?;
+    };
+    let strand: HashMap<usize, (usize, usize)> = extras
+        .iter()
+        .filter_map(|&e| strand_of(e).map(|st| (node_bone[&e], st)))
+        .collect();
+    let mut rig = crate::sway::Rig {
+        units_per_metre: s,
+        chains: extras
+            .iter()
+            .filter_map(|&e| strand.get(&node_bone[&e]).map(|&(g, _)| (node_bone[&e], g)))
+            .collect(),
+        groups: av
+            .spring_groups
+            .iter()
+            .map(|g| {
+                let d = c.apply(g.gravity_dir);
+                crate::sway::Group {
+                    name: g.name.clone(),
+                    stiffness: g.stiffness,
+                    gravity_power: g.gravity_power,
+                    gravity_dir: if len(d) > 1e-6 {
+                        norm(d)
+                    } else {
+                        [0.0, 0.0, -1.0]
+                    },
+                    drag: g.drag,
+                    hit_radius: g.hit_radius * s,
+                    colliders: g
+                        .colliders
+                        .iter()
+                        .filter_map(|col| {
+                            let b = resolve_in(col.node, &node_bone);
+                            let fr = lfr[b]?;
+                            let w = to_gs(av.nodes[col.node].world.apply(col.offset));
+                            Some((b, fr.inverse_rigid().apply(w), col.radius * s))
+                        })
+                        .collect(),
+                }
+            })
+            .collect(),
+    };
     report.push(format!(
         "bones: {} ({} from the donor, {} avatar chain bones); mapped {:?}",
         bones.len(),
@@ -522,6 +573,32 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
             tris.push(tri);
         }
     }
+    // Sway only strands that are separate meshes: a triangle joining two
+    // strands (a skirt's panels, a back-hair sheet) would tear open under
+    // rigid binding (D3) as they swing apart, so those strands stay static.
+    let mut joined: HashSet<(usize, usize)> = HashSet::new();
+    for t in &tris {
+        let st: Vec<(usize, usize)> = t
+            .iter()
+            .filter_map(|k| strand.get(&k.bone).copied())
+            .collect();
+        for a in &st {
+            if st.iter().any(|b| b != a) {
+                joined.insert(*a);
+            }
+        }
+    }
+    rig.chains.retain(|(b, _)| !joined.contains(&strand[b]));
+    let mut joined: Vec<&str> = joined
+        .iter()
+        .map(|&(_, root)| av.nodes[root].name.as_str())
+        .collect();
+    joined.sort();
+    report.push(format!(
+        "sway rig: {} chain bones can sway; strands kept static because they share triangles with another strand: {joined:?} (D15)",
+        rig.chains.len()
+    ));
+
     // Lossless edge collapse (C1, C2, C3).
     let before_reduce = tris.len();
     let (mut tris, kept_by) = crate::reduce::reduce_with_stats(&tris);
@@ -802,5 +879,6 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
         model,
         manifest: Value::Array(manifest),
         report,
+        rig,
     })
 }
