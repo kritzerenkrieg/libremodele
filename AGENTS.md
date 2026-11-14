@@ -21,6 +21,8 @@ Read `DECISIONS.md` first. It overrules `ARCHITECTURE.md` and `ROADMAP.md` where
 - Format: `cargo fmt`
 - Lint: `cargo clippy --all-targets`
 - MDL round trip by hand: `cargo run -- mdl-roundtrip <in.mdl> out/<name>.mdl`
+- Convert the fixture: `cargo run --release -- convert samples/lucian/DrHeart_Lucian_SF/VRM_Lucian_SF.vrm --donor samples/yuki_ref/models/player/yuki_muumuyu/yuki_muumuyu.mdl --name lucian` (outputs in `out/goldsrc/` and `out/review/`)
+- Preview any MDL: `cargo run --release -- preview <file.mdl> <out.png>`
 
 ## Working loop
 

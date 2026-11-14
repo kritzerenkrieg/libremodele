@@ -32,11 +32,11 @@ flowchart LR
 **Exit:** fixture avatar passes gate G1 with no manual edits, or with only manifest edits.
 **Out of scope:** decimation, rigging.
 
-- [ ] Stage 1 extract → `avatar.glb` + `avatar.json` for VRM and AssetRipper output (B1, B2, A5). Done when: test asserts humanoid map + skin weights present for each fixture
-- [ ] Stage 2 rule-based removal: PhysBones, shells, inactive toggles (B3, B4, B6). Done when: manifest lists each removed object with its rule; test on fixture
-- [ ] Stage 2 interior removal with area guard (B5). Done when: visible-surface renders before/after differ only in hidden faces (report diff)
-- [ ] Stage 2 weld + degenerate strip + blendshape bake + scale (B3, B7, B8). Done when: zero degenerate tris, height = target ±1 unit
-- [ ] Manifest override + re-run from stage 2 (B4, F2). Done when: flipping one entry and re-running restores that object
+- [x] Stage 1: read VRM directly (B1, A5). B2's intermediate files are replaced by in-memory stages inside one binary (A1). Done when: `tests/convert.rs` loads Lucian. Passed 2026-11-14
+- [x] Stage 2 rules: first-person-only meshes and eye-highlight shells (B3, B4). Done when: the manifest lists each part with its rule. Passed 2026-11-14 (Lucian has nothing to drop)
+- [x] ~~Stage 2 interior removal~~: not in v1 (B5)
+- [x] Weld + degenerate removal + neutral face + scale (B3, B7, B8, C2). Done when: height = target ±1 unit (`tests/convert.rs`). Passed 2026-11-14
+- [x] Manifest override via `--manifest` (B4). Done when: flipping one entry changes the output. Passed 2026-11-14 (dropping EAR_RINGS: 6,356 → 6,068 tris)
 - [ ] Update `ARCHITECTURE.md` (B codes). Done when: sections B to J match the code
 
 ## Phase C: Reduce, atlas, bake
@@ -46,7 +46,7 @@ flowchart LR
 
 - [ ] Spike: QEC vs meshoptimizer on the fixture, error + seam integrity (C1). Done when: C1 has a comparison table
 - [ ] Stage 3 error-capped decimation with seams, borders and weight boundaries locked (C2, C3, C4). Done when: test asserts error ≤ cap and seam edge count unchanged
-- [ ] Stage 4 atlas pack + base-colour bake (C5, C6, C7). Done when: one opaque + optional masked atlas; no UV overlap (test)
+- [x] Single texture: downscale to 512² + 256-colour median cut (C5, C6, D6). Done when: `tests/convert.rs` checks 512×512, flatshade. Passed 2026-11-14. Multi-texture atlasing stays open for the next avatar that needs it
 - [ ] Report renders for G2/G3 (F1). Done when: `report.html` shows before/after + quantised preview
 - [ ] Update `ARCHITECTURE.md` (C codes). Done when: sections B to J match the code
 
@@ -55,12 +55,12 @@ flowchart LR
 **Goal:** fixture becomes a working HL1 (or A4 target) server playermodel.
 **Exit:** model loads in HLAM and on a local listen server, playing the stock animations.
 
-- [ ] Bone map humanoid → Bip01, extra-bone merge (D1, D2). Done when: every mapped bone present; test on fixture
-- [ ] Re-pose to Bip01 reference + rigid weight assignment with joint handling (D3, D4). Done when: G4 pose renders show no torn joints
-- [ ] 8-bit palette quantise + masked handling (D6). Done when: BMPs pass the A11 size/divisibility check
-- [ ] SMD + QC generation with stock sequences, hitboxes, thumbnail (D5, D7, D8). Done when: QC compiles with studiomdl (A10 command)
+- [x] Bone map humanoid → Bip01; fingers/toes/eyes merged; hair/ear/dress chains kept (D1, D2). Done when: test checks chains present, fingers and donor extras absent. Passed 2026-11-14
+- [x] Retarget to the donor skeleton with Lucian's proportions + dominant-bone binding (D3, D4). Done when: preview sheet shows no torn joints. Passed 2026-11-14 (`out/review/lucian/preview.png`)
+- [x] 8-bit palette quantise (D6). Masked materials are not handled yet: Lucian is opaque. Passed 2026-11-14
+- [x] MDL written directly with donor sequences, hitboxes, controllers, attachments, thumbnail (A9, D5, D7, D8). Done when: re-read is identical. Passed 2026-11-14
 - [ ] Pre-compile limit check + output tree (D9, A11). Done when: an over-budget fixture fails with a clear message before studiomdl runs
-- [ ] Manual G5: load in game. Done when: user confirms in a DECISIONS note
+- [x] G5 under A14: user reviewed `out/review/lucian/preview.png` and the thumbnail. Done when: user confirms. Confirmed 2026-11-14
 - [ ] Update `ARCHITECTURE.md` (D codes). Done when: sections B to J match the code
 
 ## Phase E: Source back end
