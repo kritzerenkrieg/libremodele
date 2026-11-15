@@ -14,7 +14,9 @@ fn main() {
             licence: "l".into(),
             package: pkg.as_ref(),
             variant: a.get(2).map(String::as_str),
-            dir: None,
+            files: None,
+            path: String::new(),
+            materials: Vec::new(),
         },
     )
     .unwrap();

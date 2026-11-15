@@ -429,9 +429,18 @@ pub struct Load<'a> {
     pub package: Option<&'a Package>,
     /// Prefab (or scene) name to take settings from (G4).
     pub variant: Option<&'a str>,
-    /// Folder to search for texture files the package doesn't hold.
-    pub dir: Option<&'a std::path::Path>,
+    /// The download's files, for textures the package doesn't hold (G16).
+    pub files: Option<&'a crate::source::Files>,
+    /// The FBX's path inside `files`: lookups prefer files nearest to it.
+    pub path: String,
+    /// `--material` overrides (G12): FBX material name → `.mat` name in the
+    /// package, or an image file name (package, download) or path.
+    pub materials: Vec<(String, String)>,
 }
+
+/// Blender's default material colour (linear 0.8) in sRGB: a colour nobody
+/// set (G14).
+const DEFAULT_GREY: f64 = 0.906;
 
 pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
     let top = parse(bytes)?;
@@ -440,13 +449,29 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
     let conns = find("Connections").ok_or_else(|| anyhow!("FBX has no Connections"))?;
     let mut notes = Vec::new();
 
+    // Unity package settings (G2, G4, G5, G10, G11), matched on bone names.
+    let bone_names: Vec<String> = objects
+        .all("Model")
+        .filter(|m| m.str(2) != Some("Mesh"))
+        .map(obj_name)
+        .collect();
+    let bone_refs: Vec<&str> = bone_names.iter().map(String::as_str).collect();
+    let unity = match l.package {
+        Some(p) => Some(unitypkg::settings(p, &l.file_name, &bone_refs, l.variant)?),
+        None => None,
+    };
+    if let Some(u) = &unity {
+        notes.extend(u.notes.iter().cloned());
+    }
+
     // G6: axes and units → glTF-like Y-up, metres.
     let gs = find("GlobalSettings");
     let gi = |k: &str, d: f64| gs.and_then(|g| g.p70_num(k)).unwrap_or(d);
     let (up, up_s) = (gi("UpAxis", 1.0) as usize, gi("UpAxisSign", 1.0));
     let (front, front_s) = (gi("FrontAxis", 2.0) as usize, gi("FrontAxisSign", 1.0));
     let (coord, coord_s) = (gi("CoordAxis", 0.0) as usize, gi("CoordAxisSign", 1.0));
-    let unit = gi("UnitScaleFactor", 1.0) / 100.0;
+    // Unity's import scale applies on top of the file's units (G11).
+    let unit = gi("UnitScaleFactor", 1.0) / 100.0 * unity.as_ref().map_or(1.0, |u| u.global_scale);
     let mut axes = [[0.0f64; 4]; 4];
     axes[3][3] = 1.0;
     if up > 2 || front > 2 || coord > 2 || up == front || up == coord || front == coord {
@@ -646,23 +671,18 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
         );
     }
 
-    // Unity package settings (G2, G4, G10, G5).
-    let unity = match l.package {
-        Some(p) => Some(unitypkg::settings(p, &l.file_name, l.variant)?),
-        None => None,
-    };
-    if let Some(u) = &unity {
-        notes.extend(u.notes.iter().cloned());
-    }
-
-    // Images: package files by name first, then files under `dir`.
+    // Images: package files by name first, then the download's, nearest first.
     let mut images: Vec<Vec<u8>> = Vec::new();
     let mut image_of: HashMap<String, Option<usize>> = HashMap::new();
     let mut find_image = |name: &str, data: Option<Vec<u8>>, notes: &mut Vec<String>| {
         *image_of.entry(name.to_lowercase()).or_insert_with(|| {
             let bytes = data
                 .or_else(|| l.package.and_then(|p| p.file_by_name(name)))
-                .or_else(|| l.dir.and_then(|d| find_file(d, name, 3)));
+                .or_else(|| {
+                    l.files
+                        .and_then(|f| f.near(&l.path, name))
+                        .map(<[u8]>::to_vec)
+                });
             match bytes {
                 Some(b) if b.starts_with(b"\x89PNG") => {
                     images.push(b);
@@ -839,6 +859,7 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
                     Part {
                         id: format!("{name}#{slot}"),
                         node_name: name.clone(),
+                        material: String::new(),
                         positions: Vec::new(),
                         normals: Vec::new(),
                         uvs: Vec::new(),
@@ -896,12 +917,45 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
         for (slot, (mut part, _)) in slot_parts {
             let mat = slots.get(slot).and_then(|id| materials.get(id));
             let fbx_mat = mat.map_or("?".to_string(), |m| m.name.clone());
+            part.material = fbx_mat.clone();
             // G2: a prefab's `.mat` wins over the FBX material.
-            let unity_mat = unity
-                .as_ref()
-                .and_then(|u| u.renderer_materials.get(&name))
-                .and_then(|v| v.get(slot))
-                .and_then(|m| m.as_ref());
+            // G12: a `--material` override wins over everything.
+            let forced: Option<unitypkg::UnityMaterial> = match l
+                .materials
+                .iter()
+                .find(|(k, _)| mat.is_some_and(|m| &m.name == k))
+            {
+                Some((k, v)) => Some(
+                    l.package
+                        .and_then(|p| unitypkg::material_named(p, v))
+                        .or_else(|| {
+                            let data = l
+                                .package
+                                .and_then(|p| p.file_by_name(v))
+                                .or_else(|| {
+                                    l.files.and_then(|f| f.near(&l.path, v)).map(<[u8]>::to_vec)
+                                })
+                                .or_else(|| std::fs::read(v).ok())?;
+                            Some(unitypkg::UnityMaterial {
+                                name: v.clone(),
+                                colour: [1.0; 3],
+                                masked: false,
+                                texture: Some((base_name(v).to_string(), data)),
+                            })
+                        })
+                        .with_context(|| {
+                            format!("--material {k}={v}: no such .mat or image (G12)")
+                        })?,
+                ),
+                None => None,
+            };
+            let unity_mat = forced.as_ref().or_else(|| {
+                unity
+                    .as_ref()
+                    .and_then(|u| u.renderer_materials.get(&name))
+                    .and_then(|v| v.get(slot))
+                    .and_then(|m| m.as_ref())
+            });
             let colour;
             if let Some(um) = unity_mat {
                 colour = um.colour;
@@ -910,9 +964,14 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
                     part.image = find_image(tname, Some(data.clone()), &mut notes);
                 }
                 notes.push(format!(
-                    "part {}: Unity material {} (G2){}",
+                    "part {}: FBX material {fbx_mat} → {} {}{}",
                     part.id,
                     um.name,
+                    if forced.is_some() {
+                        "(--material, G12)"
+                    } else {
+                        "(prefab, G2)"
+                    },
                     if part.image.is_some() {
                         ""
                     } else {
@@ -947,6 +1006,37 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
         notes.push(format!(
             "{ngons} polygons with more than 4 sides ear-clipped (G6)"
         ));
+    }
+
+    // G14 (A15): a material with no texture gets the one whose paint best
+    // covers its UVs; flat colour (G3) only when none clearly fits.
+    if parts.iter().any(|p| p.part.image.is_none()) {
+        let cands = crate::pair::candidates(l.package, l.files);
+        for p in parts
+            .iter_mut()
+            .filter(|p| p.part.image.is_none() && !p.part.triangles.is_empty())
+        {
+            // An authored colour (not Blender's default 0.8 grey) marks a
+            // material meant to be flat.
+            if p.colour.iter().any(|&c| (c - DEFAULT_GREY).abs() > 0.01) {
+                notes.push(format!(
+                    "part {}: colour {:.2?} set in the FBX, kept flat (G14)",
+                    p.part.id, p.colour
+                ));
+                continue;
+            }
+            match crate::pair::choose(&p.part, &p.part.material, &l.path, &cands) {
+                Ok((c, f, line)) => {
+                    p.part.image = find_image(&c.file, Some(c.png.clone()), &mut notes);
+                    p.part.masked = c.masked.unwrap_or(f.clear > 0.05); // C5
+                    notes.push(format!("part {}: texture paired (G14): {line}", p.part.id));
+                }
+                Err(why) => notes.push(format!(
+                    "part {}: no texture paired (G14): {why}; flat colour",
+                    p.part.id
+                )),
+            }
+        }
     }
 
     // G3: one swatch texture for every flat-colour part.
@@ -1167,23 +1257,6 @@ fn world_raw(i: usize, parent: &[Option<usize>], local: &[M4], bind: &HashMap<us
         Some(p) => mm(&world_raw(p, parent, local, bind), &local[i]),
         None => local[i],
     }
-}
-
-fn find_file(dir: &std::path::Path, name: &str, depth: usize) -> Option<Vec<u8>> {
-    let mut entries: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().collect();
-    entries.sort_by_key(|e| e.file_name());
-    for e in &entries {
-        if e.file_name().to_string_lossy().eq_ignore_ascii_case(name) {
-            return std::fs::read(e.path()).ok();
-        }
-    }
-    if depth == 0 {
-        return None;
-    }
-    entries
-        .iter()
-        .filter(|e| e.path().is_dir())
-        .find_map(|e| find_file(&e.path(), name, depth - 1))
 }
 
 /// (control point, normal bits, UV bits): corners that weld into one vertex.

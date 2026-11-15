@@ -71,7 +71,7 @@ flowchart LR
 - [x] Miku (VRM, 65,737 tris, 191 bones, 4 images with alpha) converts: bone budget merges the deepest chain links (D2), one texture per (image, masked) with per-mesh normal runs (C5, D6), lossy QEM to the 20k default budget (C4, revised after the first in-game test showed a bald, broken face at 9k) with optimal placement, staged locks and layer clearance caps so skin can't move through the hair or over the eyes (C2, C8), deterministic output. Done when: `tests/convert.rs` `miku_converts` passes. Passed 2026-11-14
 - [x] Miku in game (Sven, local listen server, `miku` and `miku_sway`). Done when: user confirms. Confirmed 2026-11-15 after the C4/C8 fixes (first try at 9k failed: bald, broken face)
 - [x] Neru: FBX only, needs Phase G (B9, G1–G10 Decided) Converted and confirmed in game 2026-11-15
-- [ ] Third avatar: Gothic Doll turned out to be an outfit without its base doll (2026-11-15); the user picks another complete avatar
+- [x] Third avatar: Gothic Doll turned out to be an outfit without its base doll (2026-11-15). Replaced by Kilerbomb's Poka Blondy and Blindy (FBX + package, G11–G13): both convert (`poka_blondy_converts`, `poka_blindy_converts`). Done when: user confirms both in game (confirmed 2026-11-15)
 
 ## Phase E: Source back end
 
@@ -105,7 +105,15 @@ flowchart LR
 - [x] PhysBone → sway (G5, D15). Done when: Gothic `--sway` reports swaying strands per the strand rule Passed 2026-11-15 (8 ribbon bones sway; 12 joined skirt strands static)
 - [x] `convert` takes FBX + package + `--licence` (G7). Done when: `neru_converts` passes and Gothic's outfit reaches the 20k budget (C9) Passed 2026-11-15 (Gothic 184,598 → 20,000 in ~3.5 min, G8)
 - [x] Neru in game. Done when: user confirms Confirmed 2026-11-15
-- [ ] Update `ARCHITECTURE.md` (G codes). Done when: sections B to J match the code
+- [x] Update `ARCHITECTURE.md` (G codes). Done when: sections B to J match the code. Passed 2026-11-15 (rewritten for Phase G and the C4/C5/C8/C9/D2 revisions)
+
+### Procedural follow-up (A15)
+
+- [x] `convert <download.zip | folder | .vrm | .fbx>`: rank the avatar files and packages inside, report the choice and runners-up (G16). Done when: Poka Blindy and Blondy, Neru and Miku convert from their downloads with no flags (all six zips and sample folders, 2026-11-15; `downloads_choose`)
+- [x] Licence discovery (G15). Done when: Poka and Miku get their licence text with no `--licence`; Neru warns, Gothic is refused by G17 (check reworded with the user, 2026-11-15)
+- [x] Outfit-only detection (G17). Done when: Gothic stops with a clear message; the five avatars pass (head cover 1.00 for all five vs 0.05 for Gothic)
+- [x] Automatic material pairing (G14, method in G19). Done when: Blindy converts with no `--material` and picks `bodyo.png`; Blondy and Neru unchanged (all three byte-identical to the installed builds, 2026-11-15)
+- [ ] Spike: Unity fileID hash (G18). Done when: G18 has evidence either way
 
 ## Cycle: feature and maintenance
 

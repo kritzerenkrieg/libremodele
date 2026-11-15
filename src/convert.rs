@@ -703,6 +703,29 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
             if dst.reached { "" } else { "; budget not reached" }
         ));
     }
+    // D17: back faces for open sheets (skirts, sleeves, hair cards) so they
+    // don't vanish when seen from behind (GoldSrc always culls). Only spare
+    // budget is used, nearest an open edge first.
+    let dist = border_distance(&tris);
+    let mut order: Vec<usize> = (0..tris.len()).filter(|&i| dist[i].is_some()).collect();
+    order.sort_by_key(|&i| (dist[i], i));
+    let open = order.len();
+    order.truncate(budget.saturating_sub(tris.len()));
+    let backs: Vec<[Corner; 3]> = order
+        .iter()
+        .map(|&i| {
+            let t = tris[i];
+            [t[0], t[2], t[1]].map(|c| Corner {
+                n: [-c.n[0], -c.n[1], -c.n[2]],
+                ..c
+            })
+        })
+        .collect();
+    report.push(format!(
+        "two-sided (D17): {} of {open} triangles in open pieces get a back face (spare budget, nearest an open edge first)",
+        backs.len()
+    ));
+    tris.extend(backs);
     if tris.len() > MAX_TRIS {
         bail!("{} triangles, over the {MAX_TRIS} limit", tris.len());
     }
@@ -1046,4 +1069,133 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
         report,
         rig,
     })
+}
+
+/// Per triangle: hops (across shared edges, by position) to the nearest
+/// triangle with an open edge; None in closed pieces (D17).
+fn border_distance(tris: &[[crate::decimate::Vtx; 3]]) -> Vec<Option<u32>> {
+    let mut id: HashMap<[i32; 3], usize> = HashMap::new();
+    let vid: Vec<[usize; 3]> = tris
+        .iter()
+        .map(|t| {
+            t.map(|c| {
+                let n = id.len();
+                *id.entry(c.p.map(|x| (x * 1e4).round() as i32)).or_insert(n)
+            })
+        })
+        .collect();
+    let mut edges: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    for (ti, v) in vid.iter().enumerate() {
+        for k in 0..3 {
+            let (a, b) = (v[k], v[(k + 1) % 3]);
+            if a != b {
+                edges.entry((a.min(b), a.max(b))).or_default().push(ti);
+            }
+        }
+    }
+    let mut dist: Vec<Option<u32>> = vec![None; tris.len()];
+    let mut queue = std::collections::VecDeque::new();
+    let mut seeds: Vec<usize> = edges
+        .values()
+        .filter(|t| t.len() == 1)
+        .map(|t| t[0])
+        .collect();
+    seeds.sort_unstable();
+    seeds.dedup();
+    for t in seeds {
+        dist[t] = Some(0);
+        queue.push_back(t);
+    }
+    while let Some(t) = queue.pop_front() {
+        let d = dist[t].unwrap() + 1;
+        let v = vid[t];
+        for k in 0..3 {
+            let (a, b) = (v[k], v[(k + 1) % 3]);
+            for &n in edges.get(&(a.min(b), a.max(b))).into_iter().flatten() {
+                if dist[n].is_none() {
+                    dist[n] = Some(d);
+                    queue.push_back(n);
+                }
+            }
+        }
+    }
+    dist
+}
+
+/// How much of the head is surrounded by geometry: the share of rays from
+/// the middle of the head (sideways, and tilted up) that hit a triangle
+/// within a head's reach. A full avatar has a face, skull or hair all round;
+/// an outfit has at most a hat or collar (G17). `None` without a head bone.
+pub fn head_cover(av: &Avatar) -> Option<f32> {
+    let head = *av.humanoid.get("head")?;
+    let (lo, hi) = av
+        .parts
+        .iter()
+        .flat_map(|p| &p.positions)
+        .fold((f32::MAX, f32::MIN), |(l, h), p| (l.min(p[1]), h.max(p[1])));
+    if lo >= hi {
+        return Some(0.0);
+    }
+    let h = hi - lo;
+    let reach = h / 6.0;
+    let c = crate::math::add(av.nodes[head].world.t, [0.0, h / 16.0, 0.0]);
+    let near = |p: V3| len(sub(p, c)) < reach * 1.5;
+    let tris: Vec<[V3; 3]> = av
+        .parts
+        .iter()
+        .flat_map(|p| {
+            p.triangles.iter().filter_map(|t| {
+                let v = t.map(|i| p.positions[i as usize]);
+                v.iter().any(|&q| near(q)).then_some(v)
+            })
+        })
+        .collect();
+    let mut rays = Vec::new();
+    for (k, el) in [(12, 0.0f32), (8, 0.6), (1, 1.5707964)] {
+        for i in 0..k {
+            let a = i as f32 * std::f32::consts::TAU / k as f32;
+            rays.push([el.cos() * a.cos(), el.sin(), el.cos() * a.sin()]);
+        }
+    }
+    let hits = rays
+        .iter()
+        .filter(|&&d| {
+            tris.iter()
+                .any(|t| ray_hit(c, d, t).is_some_and(|s| s < reach))
+        })
+        .count();
+    Some(hits as f32 / rays.len() as f32)
+}
+
+/// Möller–Trumbore, both sides; the distance along `d` (unit) if it hits.
+fn ray_hit(o: V3, d: V3, t: &[V3; 3]) -> Option<f32> {
+    let e1 = sub(t[1], t[0]);
+    let e2 = sub(t[2], t[0]);
+    let p = cross(d, e2);
+    let det = dot(e1, p);
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let s = sub(o, t[0]);
+    let u = dot(s, p) / det;
+    let q = cross(s, e1);
+    let v = dot(d, q) / det;
+    let dist = dot(e2, q) / det;
+    (u >= 0.0 && v >= 0.0 && u + v <= 1.0 && dist > 0.0).then_some(dist)
+}
+
+/// Head cover below this is an outfit, not an avatar (G17).
+pub const MIN_HEAD_COVER: f32 = 0.5;
+
+/// Why `av` can't be a playermodel on its own, if it can't (G17).
+pub fn incomplete(av: &Avatar) -> Option<String> {
+    match head_cover(av) {
+        None => Some("no head bone".into()),
+        Some(c) if c < MIN_HEAD_COVER => Some(format!(
+            "looks like an outfit, not an avatar: only {:.0}% of the head is covered by geometry (need {:.0}%)",
+            c * 100.0,
+            MIN_HEAD_COVER * 100.0
+        )),
+        Some(_) => None,
+    }
 }

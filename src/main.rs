@@ -3,11 +3,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use libremodele::{convert, fbx, mdl, preview, sway, texture, unitypkg, vrm};
+use libremodele::{convert, mdl, preview, source, sway, texture};
 
 const USAGE: &str = "usage:
-  libremodele convert <avatar.vrm> --donor <donor.mdl> --name <name> [--height <units>] [--max-tris <n>] [--manifest <clean_manifest.json>] [--out <dir>] [--sway]
-  libremodele convert <avatar.fbx> --licence <text> [--package <x.unitypackage>] [--variant <prefab>] (other flags as above)
+  libremodele convert <download.zip | folder | avatar.vrm | avatar.fbx> --donor <donor.mdl> [--sway]
+      optional overrides (A15): [--name <name>] [--avatar <file in input>] [--package <x.unitypackage>]
+      [--licence <text>] [--variant <prefab>] [--material <fbx material>=<.mat or image>]...
+      [--height <units>] [--max-tris <n>] [--manifest <clean_manifest.json>] [--out <dir>]
   libremodele preview <file.mdl> <out.png>
   libremodele mdl-info <file.mdl>
   libremodele mdl-roundtrip <in.mdl> <out.mdl>";
@@ -56,16 +58,8 @@ fn flag<'a>(rest: &[&'a str], name: &str) -> Option<&'a str> {
         .copied()
 }
 
-fn convert_cmd(vrm_path: &str, rest: &[&str]) -> Result<()> {
+fn convert_cmd(input: &str, rest: &[&str]) -> Result<()> {
     let donor_path = flag(rest, "--donor").context("--donor <donor.mdl> is required (D7)")?;
-    let name = flag(rest, "--name").context("--name <name> is required")?;
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        bail!("--name must be ASCII letters, digits, _ or -");
-    }
     let height = flag(rest, "--height")
         .map(str::parse::<f32>)
         .transpose()
@@ -89,39 +83,54 @@ fn convert_cmd(vrm_path: &str, rest: &[&str]) -> Result<()> {
         }
     }
 
-    let bytes = std::fs::read(vrm_path).with_context(|| format!("reading {vrm_path}"))?;
-    let av = if vrm_path.to_lowercase().ends_with(".fbx") {
-        // Phase G (B9): FBX + optional Unity package; the licence is required (G7).
-        let licence = flag(rest, "--licence")
-            .context("--licence <text> is required for FBX input: an FBX carries none (G7, A6)")?;
-        let package = flag(rest, "--package")
-            .map(|p| {
-                unitypkg::Package::read(&std::fs::read(p).with_context(|| format!("reading {p}"))?)
-                    .with_context(|| format!("parsing {p}"))
+    // A15, G16: everything is chosen from the input; flags only override.
+    let (files, file) = source::Files::open(Path::new(input))?;
+    let overrides = source::Overrides {
+        avatar: flag(rest, "--avatar").map(str::to_string).or(file),
+        package: flag(rest, "--package").map(|p| {
+            // A path outside the input is read as is.
+            p.to_string()
+        }),
+        licence: flag(rest, "--licence").map(str::to_string),
+        variant: flag(rest, "--variant").map(str::to_string),
+        materials: rest
+            .iter()
+            .zip(rest.iter().skip(1))
+            .filter(|(a, _)| **a == "--material")
+            .map(|(_, v)| {
+                v.split_once('=')
+                    .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                    .with_context(|| {
+                        format!("--material wants \"<FBX material>=<.mat or image>\", got {v:?}")
+                    })
             })
-            .transpose()?;
-        let path = Path::new(vrm_path);
-        fbx::load(
-            &bytes,
-            &fbx::Load {
-                file_name: path
-                    .file_name()
-                    .map(|f| f.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                title: path
-                    .file_stem()
-                    .map(|f| f.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                licence: licence.to_string(),
-                package: package.as_ref(),
-                variant: flag(rest, "--variant"),
-                dir: path.parent().and_then(Path::parent),
-            },
-        )
-    } else {
-        vrm::load(&bytes)
+            .collect::<Result<_>>()?,
+    };
+    let mut files = files;
+    if let Some(p) = &overrides.package
+        && files.get(p).is_none()
+        && !files
+            .entries
+            .iter()
+            .any(|(e, _)| e.ends_with(&format!("/{p}")))
+    {
+        let data = std::fs::read(p).with_context(|| format!("reading {p}"))?;
+        files.entries.push((p.clone(), data));
     }
-    .with_context(|| format!("parsing {vrm_path}"))?;
+    let chosen = source::choose(&files, &overrides).with_context(|| format!("reading {input}"))?;
+    let av = chosen.avatar;
+    let name = match flag(rest, "--name") {
+        Some(n) => n.to_string(),
+        None => source::default_name(Path::new(input), &chosen.path),
+    };
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        bail!("--name must be ASCII letters, digits, _ or -");
+    }
+    let name = name.as_str();
     let donor = load(donor_path)?;
     let c = convert::convert(
         &av,

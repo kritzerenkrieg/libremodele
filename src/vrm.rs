@@ -20,6 +20,8 @@ pub struct Part {
     /// `node/mesh#primitive`, used in the clean manifest (B4).
     pub id: String,
     pub node_name: String,
+    /// The source material's name (glTF or FBX), for ranking inputs (G16).
+    pub material: String,
     pub positions: Vec<V3>,
     pub normals: Vec<V3>,
     pub uvs: Vec<[f32; 2]>,
@@ -256,9 +258,17 @@ pub fn load(bytes: &[u8]) -> Result<Avatar> {
             let id = format!("{}/{}#{pi}", nodes[ni].name, mesh_name);
             let part = primitive(&g, p, ni, skin, &nodes).with_context(|| id.clone())?;
             let (image, unlit, masked) = material(j, p)?;
+            let material = p
+                .get("material")
+                .and_then(Value::as_u64)
+                .and_then(|mi| j.pointer(&format!("/materials/{mi}/name")))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             parts.push(Part {
                 id,
                 node_name: nodes[ni].name.clone(),
+                material,
                 image,
                 unlit,
                 masked,
@@ -502,6 +512,7 @@ fn primitive(g: &Glb, p: &Value, node: usize, skin: Option<usize>, nodes: &[Node
     Ok(Part {
         id: String::new(),
         node_name: String::new(),
+        material: String::new(),
         positions,
         normals,
         uvs,

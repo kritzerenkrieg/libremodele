@@ -151,7 +151,6 @@ pub struct PhysBone {
     pub colliders: Vec<PhysCollider>,
 }
 
-#[derive(Default)]
 pub struct Settings {
     pub notes: Vec<String>,
     /// Renderer GameObject name → material per slot.
@@ -159,25 +158,88 @@ pub struct Settings {
     /// Unity humanoid map from the FBX `.meta`: (bone name, human name).
     pub human: Vec<(String, String)>,
     pub physbones: Vec<PhysBone>,
+    /// The FBX `.meta` import scale (`globalScale`), 1 when absent.
+    pub global_scale: f64,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            notes: Vec::new(),
+            renderer_materials: HashMap::new(),
+            human: Vec::new(),
+            physbones: Vec::new(),
+            global_scale: 1.0,
+        }
+    }
+}
+
+/// A `.mat` by name (with or without `.mat`), for `--material` (G12).
+pub fn material_named(p: &Package, name: &str) -> Option<UnityMaterial> {
+    let want = name.strip_suffix(".mat").unwrap_or(name);
+    p.assets
+        .iter()
+        .find(|a| {
+            base(&a.path)
+                .strip_suffix(".mat")
+                .is_some_and(|b| b.eq_ignore_ascii_case(want))
+        })
+        .and_then(|a| material(p, a))
+}
+
+/// Every `.mat` in the package, for automatic pairing (G14).
+pub fn materials(p: &Package) -> Vec<UnityMaterial> {
+    p.assets.iter().filter_map(|a| material(p, a)).collect()
 }
 
 /// Settings for `fbx_name` (the FBX file name) from the package. `variant`
 /// picks a prefab or scene by name (G4); the default is the first prefab by
 /// path, else the first scene.
-pub fn settings(p: &Package, fbx_name: &str, variant: Option<&str>) -> Result<Settings> {
+pub fn settings(
+    p: &Package,
+    fbx_name: &str,
+    bones: &[&str],
+    variant: Option<&str>,
+) -> Result<Settings> {
     let mut s = Settings::default();
 
-    // G10: Unity humanoid map.
+    // The package's copy of this FBX: by file name, else (G11) the FBX whose
+    // `.meta` skeleton shares the most bone names with ours.
     let fbx = p
         .assets
         .iter()
         .find(|a| base(&a.path).eq_ignore_ascii_case(fbx_name))
         .or_else(|| {
+            let ours: std::collections::HashSet<&str> = bones.iter().copied().collect();
             p.assets
                 .iter()
-                .find(|a| a.path.to_lowercase().ends_with(".fbx"))
+                .filter(|a| a.path.to_lowercase().ends_with(".fbx"))
+                .filter_map(|a| {
+                    let meta = String::from_utf8_lossy(a.meta.as_deref()?).into_owned();
+                    let n = meta
+                        .lines()
+                        .filter_map(|l| l.trim().strip_prefix("- name: "))
+                        .filter(|n| ours.contains(n.trim()))
+                        .count();
+                    (n > 0).then_some((n, a))
+                })
+                // Most shared names; ties to the first by path.
+                .max_by(|x, y| x.0.cmp(&y.0).then(y.1.path.cmp(&x.1.path)))
+                .map(|(n, a)| {
+                    s.notes.push(format!(
+                        "unitypackage: {fbx_name} is not in the package; using {} ({n} shared bone names, G11)",
+                        a.path
+                    ));
+                    a
+                })
         });
     if let Some(meta) = fbx.and_then(|a| a.meta.as_deref()) {
+        let text = String::from_utf8_lossy(meta);
+        s.global_scale = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("globalScale: "))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(1.0);
         let text = String::from_utf8_lossy(meta);
         let mut lines = text.lines().peekable();
         while let Some(l) = lines.next() {
@@ -203,10 +265,16 @@ pub fn settings(p: &Package, fbx_name: &str, variant: Option<&str>) -> Result<Se
         v
     };
     // By name, so `Gothic Doll` comes before `Gothic Doll 1` (G4).
-    let candidates: Vec<&Asset> = by_stem(".prefab")
+    let mut candidates: Vec<&Asset> = by_stem(".prefab")
         .into_iter()
         .chain(by_stem(".unity"))
         .collect();
+    // G11: prefabs and scenes that use this FBX come first.
+    if let Some(g) = fbx.map(|a| format!("guid: {}", a.guid)) {
+        candidates.sort_by_key(|a| {
+            !String::from_utf8_lossy(a.data.as_deref().unwrap_or_default()).contains(&g)
+        });
+    }
     let chosen = match variant {
         Some(v) => Some(
             *candidates
@@ -227,7 +295,7 @@ pub fn settings(p: &Package, fbx_name: &str, variant: Option<&str>) -> Result<Se
         return Ok(s);
     };
     s.notes.push(format!(
-        "unitypackage variant (G4): {} (of {:?})",
+        "unitypackage variant (G4, G11): {} (of {:?})",
         chosen.path,
         candidates.iter().map(|a| stem(a)).collect::<Vec<_>>()
     ));
