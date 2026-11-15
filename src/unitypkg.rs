@@ -2,8 +2,8 @@
 //! `<guid>/asset` and `<guid>/asset.meta`. From it we read what the FBX
 //! doesn't hold: `.mat` colours and textures a prefab puts on each renderer
 //! (G2), the prefab variant (G4), Unity's humanoid map (G10) and VRChat
-//! PhysBones (G5). Objects a scene names only by Unity's hashed fileIDs
-//! inside the FBX can't be resolved; they are skipped and reported (G9).
+//! PhysBones (G5). Objects inside the FBX, which scenes name only by Unity's
+//! hashed fileIDs, are found by reproducing the hash (G18; was skipped, G9).
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -160,6 +160,9 @@ pub struct Settings {
     pub physbones: Vec<PhysBone>,
     /// The FBX `.meta` import scale (`globalScale`), 1 when absent.
     pub global_scale: f64,
+    /// FBX material name → `.mat`, from the FBX `.meta` `externalObjects`:
+    /// Unity's own remap, used where no prefab override applies (G2).
+    pub remap: HashMap<String, UnityMaterial>,
 }
 
 impl Default for Settings {
@@ -170,6 +173,7 @@ impl Default for Settings {
             human: Vec::new(),
             physbones: Vec::new(),
             global_scale: 1.0,
+            remap: HashMap::new(),
         }
     }
 }
@@ -195,21 +199,25 @@ pub fn materials(p: &Package) -> Vec<UnityMaterial> {
 /// Settings for `fbx_name` (the FBX file name) from the package. `variant`
 /// picks a prefab or scene by name (G4); the default is the first prefab by
 /// path, else the first scene.
+///
+/// `paths` are the converted FBX's object paths (`Armature/hips`): Unity names
+/// objects inside an FBX by a hash of them (G18).
 pub fn settings(
     p: &Package,
     fbx_name: &str,
     bones: &[&str],
+    paths: &[String],
     variant: Option<&str>,
 ) -> Result<Settings> {
     let mut s = Settings::default();
 
     // The package's copy of this FBX: by file name, else (G11) the FBX whose
     // `.meta` skeleton shares the most bone names with ours.
-    let fbx = p
+    let by_name = p
         .assets
         .iter()
-        .find(|a| base(&a.path).eq_ignore_ascii_case(fbx_name))
-        .or_else(|| {
+        .find(|a| base(&a.path).eq_ignore_ascii_case(fbx_name));
+    let fbx = by_name.or_else(|| {
             let ours: std::collections::HashSet<&str> = bones.iter().copied().collect();
             p.assets
                 .iter()
@@ -240,6 +248,28 @@ pub fn settings(
             .find_map(|l| l.trim().strip_prefix("globalScale: "))
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(1.0);
+        // Unity's material remap; only for the package's own FBX (as G18):
+        // through G11 the names belong to another file.
+        if by_name.is_some() {
+            let lines: Vec<&str> = text.lines().map(str::trim).collect();
+            for (i, l) in lines.iter().enumerate() {
+                if *l == "type: UnityEngine:Material"
+                    && let Some(name) = lines.get(i + 2).and_then(|n| n.strip_prefix("name: "))
+                    && let Some(r) = lines.get(i + 3).and_then(|n| n.strip_prefix("second: "))
+                    && let Some(m) = guid(r)
+                        .and_then(|g| p.by_guid(g))
+                        .and_then(|a| material(p, a))
+                {
+                    s.remap.insert(name.to_string(), m);
+                }
+            }
+            if !s.remap.is_empty() {
+                s.notes.push(format!(
+                    "unitypackage: {} FBX materials remapped to .mat files by the FBX .meta (G2)",
+                    s.remap.len()
+                ));
+            }
+        }
         let text = String::from_utf8_lossy(meta);
         let mut lines = text.lines().peekable();
         while let Some(l) = lines.next() {
@@ -302,19 +332,35 @@ pub fn settings(
     let text = String::from_utf8_lossy(chosen.data.as_deref().unwrap()).into_owned();
     let docs = split_docs(&text);
     let by_id: HashMap<i64, &Doc> = docs.iter().map(|d| (d.id, d)).collect();
+    // G18: objects inside the FBX, by Unity's hashed fileID → (class, name).
+    let fbx_guid = fbx.map(|a| a.guid.as_str()).unwrap_or("");
+    let hashed = hashed_ids(paths);
+    // A stripped object stands for one inside the FBX (or a nested prefab).
+    let source = |d: &Doc, class: i32| -> Option<String> {
+        let r = d.get("m_CorrespondingSourceObject")?;
+        if guid(r)? != fbx_guid {
+            return None;
+        }
+        hashed
+            .get(&file_id(r)?)
+            .filter(|(c, _)| *c == class)
+            .map(|(_, n)| n.clone())
+    };
     let go_name = |id: i64| -> Option<String> {
         let d = by_id.get(&id)?;
-        if d.stripped || d.class != 1 {
-            return None;
+        match (d.class, d.stripped) {
+            (1, false) => d.get("m_Name").map(str::to_string),
+            (1, true) => source(d, 1),
+            _ => None,
         }
-        d.get("m_Name").map(str::to_string)
     };
-    let transform_go = |id: i64| -> Option<i64> {
+    let tf_name = |id: i64| -> Option<String> {
         let d = by_id.get(&id)?;
-        if d.stripped || !matches!(d.class, 4 | 224) {
-            return None;
+        match (d.class, d.stripped) {
+            (4 | 224, false) => go_name(file_id(d.get("m_GameObject")?)?),
+            (4 | 224, true) => source(d, 4),
+            _ => None,
         }
-        file_id(d.get("m_GameObject")?)
     };
     let mut unresolved = 0usize;
 
@@ -338,10 +384,44 @@ pub fn settings(
             .collect();
         s.renderer_materials.insert(name, mats);
     }
-    let overrides = text.matches("propertyPath: m_Materials.Array.data").count();
-    if overrides > 0 {
+    // G18: material overrides on the FBX's renderers, from prefab instances.
+    let (mut applied, mut skipped) = (0usize, 0usize);
+    for o in material_overrides(&text) {
+        let target = (o.guid == fbx_guid)
+            .then(|| hashed.get(&o.target))
+            .flatten()
+            .filter(|(c, _)| matches!(c, 137 | 23));
+        let mat = p.by_guid(&o.material).and_then(|a| material(p, a));
+        match (target, mat) {
+            // Only for the package's own FBX: through G11's bone match the
+            // objects belong to another file (Blindy's would get the
+            // Combined FBX's atlas).
+            (Some((_, name)), Some(m)) if by_name.is_some() => {
+                let slots = s.renderer_materials.entry(name.clone()).or_default();
+                if slots.len() <= o.slot {
+                    slots.resize(o.slot + 1, None);
+                }
+                slots[o.slot] = Some(m);
+                applied += 1;
+            }
+            _ => skipped += 1,
+        }
+    }
+    if applied + skipped > 0 {
         s.notes.push(format!(
-            "unitypackage: {overrides} material overrides on prefab instances name FBX objects by Unity's hashed fileIDs; skipped, FBX materials used (G9)"
+            "unitypackage: {applied} material overrides applied by Unity's hashed fileIDs (G18){}",
+            if skipped > 0 {
+                format!(
+                    "; {skipped} not ({})",
+                    if by_name.is_some() {
+                        "their objects aren't in this FBX"
+                    } else {
+                        "the converted FBX is not the package's own, G11"
+                    }
+                )
+            } else {
+                String::new()
+            }
         ));
     }
 
@@ -352,12 +432,12 @@ pub fn settings(
     {
         let own = d.get("m_GameObject").and_then(file_id);
         let root_tf = d.get("rootTransform").and_then(file_id).unwrap_or(0);
-        let root_go = if root_tf == 0 {
-            own
+        let root = if root_tf == 0 {
+            own.and_then(go_name)
         } else {
-            transform_go(root_tf)
+            tf_name(root_tf)
         };
-        let Some(root) = root_go.and_then(go_name) else {
+        let Some(root) = root else {
             unresolved += 1;
             continue;
         };
@@ -366,7 +446,7 @@ pub fn settings(
             .list("ignoreTransforms")
             .iter()
             .filter_map(|r| file_id(r))
-            .filter_map(|t| transform_go(t).and_then(go_name))
+            .filter_map(tf_name)
             .collect();
         let colliders = d
             .list("colliders")
@@ -375,13 +455,13 @@ pub fn settings(
             .filter(|c| !c.stripped)
             .filter_map(|c| {
                 let tf = c.get("rootTransform").and_then(file_id).unwrap_or(0);
-                let go = if tf == 0 {
-                    c.get("m_GameObject").and_then(file_id)
+                let bone = if tf == 0 {
+                    c.get("m_GameObject").and_then(file_id).and_then(go_name)
                 } else {
-                    transform_go(tf)
+                    tf_name(tf)
                 };
                 Some(PhysCollider {
-                    bone: go.and_then(go_name)?,
+                    bone: bone?,
                     position: vec3(c.get("position")?),
                     radius: c.get("radius")?.parse().ok()?,
                 })
@@ -399,7 +479,7 @@ pub fn settings(
     }
     if unresolved > 0 {
         s.notes.push(format!(
-            "unitypackage: {unresolved} renderers/PhysBones sit on prefab-instance objects named only by Unity's hashed fileIDs; skipped (G9)"
+            "unitypackage: {unresolved} renderers/PhysBones sit on objects not found in this FBX, even by hashed fileID (G18); skipped"
         ));
     }
     Ok(s)
@@ -515,9 +595,157 @@ fn vec3(s: &str) -> [f32; 3] {
     [f("x"), f("y"), f("z")]
 }
 
+/// Unity's fileIDs for objects inside an FBX (`fileIdsGeneration: 2`, G18):
+/// XXH64 of `Type:<Class>->//RootNode/root/<path>[/<Class>]0`. Unofficial;
+/// checked against Neru's and the Poka packages.
+fn hashed_ids(paths: &[String]) -> HashMap<i64, (i32, String)> {
+    let mut out = HashMap::new();
+    let id = |s: String| xxh64(s.as_bytes()) as i64;
+    for p in paths {
+        let name = p.rsplit('/').next().unwrap_or(p).to_string();
+        let at = format!("//RootNode/root/{p}");
+        out.insert(id(format!("Type:GameObject->{at}0")), (1, name.clone()));
+        for (class, c) in [
+            (4, "Transform"),
+            (137, "SkinnedMeshRenderer"),
+            (23, "MeshRenderer"),
+        ] {
+            out.insert(id(format!("Type:{c}->{at}/{c}0")), (class, name.clone()));
+        }
+    }
+    out
+}
+
+/// XXH64 with seed 0.
+pub fn xxh64(d: &[u8]) -> u64 {
+    const P1: u64 = 11400714785074694791;
+    const P2: u64 = 14029467366897019727;
+    const P3: u64 = 1609587929392839161;
+    const P4: u64 = 9650029242287828579;
+    const P5: u64 = 2870177450012600261;
+    let u64_at = |i: usize| u64::from_le_bytes(d[i..i + 8].try_into().unwrap());
+    let round = |acc: u64, v: u64| {
+        acc.wrapping_add(v.wrapping_mul(P2))
+            .rotate_left(31)
+            .wrapping_mul(P1)
+    };
+    let mut i = 0;
+    let mut h = if d.len() >= 32 {
+        let mut v = [P1.wrapping_add(P2), P2, 0, 0u64.wrapping_sub(P1)];
+        while i + 32 <= d.len() {
+            for (k, vk) in v.iter_mut().enumerate() {
+                *vk = round(*vk, u64_at(i + 8 * k));
+            }
+            i += 32;
+        }
+        let mut h = v[0]
+            .rotate_left(1)
+            .wrapping_add(v[1].rotate_left(7))
+            .wrapping_add(v[2].rotate_left(12))
+            .wrapping_add(v[3].rotate_left(18));
+        for vk in v {
+            h = (h ^ round(0, vk)).wrapping_mul(P1).wrapping_add(P4);
+        }
+        h
+    } else {
+        P5
+    };
+    h = h.wrapping_add(d.len() as u64);
+    while i + 8 <= d.len() {
+        h = (h ^ round(0, u64_at(i)))
+            .rotate_left(27)
+            .wrapping_mul(P1)
+            .wrapping_add(P4);
+        i += 8;
+    }
+    if i + 4 <= d.len() {
+        let k = u32::from_le_bytes(d[i..i + 4].try_into().unwrap()) as u64;
+        h = (h ^ k.wrapping_mul(P1))
+            .rotate_left(23)
+            .wrapping_mul(P2)
+            .wrapping_add(P3);
+        i += 4;
+    }
+    for &b in &d[i..] {
+        h = (h ^ (b as u64).wrapping_mul(P5))
+            .rotate_left(11)
+            .wrapping_mul(P1);
+    }
+    h ^= h >> 33;
+    h = h.wrapping_mul(P2);
+    h ^= h >> 29;
+    h = h.wrapping_mul(P3);
+    h ^ (h >> 32)
+}
+
+struct MaterialOverride {
+    target: i64,
+    guid: String,
+    slot: usize,
+    material: String,
+}
+
+/// `m_Materials.Array.data[N]` modifications in prefab instances.
+fn material_overrides(text: &str) -> Vec<MaterialOverride> {
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let mut out = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        let Some(t) = l.strip_prefix("- target: ") else {
+            continue;
+        };
+        // Long `target` lines wrap, so look a few lines on.
+        let next = &lines[i + 1..(i + 6).min(lines.len())];
+        let Some(slot) = next
+            .iter()
+            .take_while(|n| !n.starts_with("- target:"))
+            .find_map(|n| n.strip_prefix("propertyPath: "))
+            .and_then(|n| n.strip_prefix("m_Materials.Array.data["))
+            .and_then(|n| n.strip_suffix(']'))
+            .and_then(|n| n.parse().ok())
+        else {
+            continue;
+        };
+        let Some(obj) = next
+            .iter()
+            .take_while(|n| !n.starts_with("- target:"))
+            .find_map(|n| n.strip_prefix("objectReference: "))
+        else {
+            continue;
+        };
+        if let (Some(target), Some(g), Some(m)) = (file_id(t), guid(t), guid(obj)) {
+            out.push(MaterialOverride {
+                target,
+                guid: g.to_string(),
+                slot,
+                material: m.to_string(),
+            });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fbx_file_ids_match_unity() {
+        assert_eq!(super::xxh64(b""), 0xEF46DB3751D8E999);
+        // Shared by every FBX prefab Unity imports (G18).
+        let ids = super::hashed_ids(&[]);
+        assert!(ids.is_empty());
+        let id = |s: &str| super::xxh64(s.as_bytes()) as i64;
+        assert_eq!(id("Type:GameObject->//RootNode/root0"), 919132149155446097);
+        assert_eq!(
+            id("Type:Transform->//RootNode/root/Transform0"),
+            -8679921383154817045
+        );
+        // Longer than 32 bytes: the four-lane path.
+        assert_eq!(
+            id("Type:SkinnedMeshRenderer->//RootNode/root/Plane/SkinnedMeshRenderer0"),
+            7205140776170859923
+        );
+    }
 
     #[test]
     fn yaml_docs_fields_and_lists() {

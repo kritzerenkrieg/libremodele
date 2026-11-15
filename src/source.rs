@@ -1,6 +1,6 @@
 //! What to convert, chosen from a download with no hand choices (A15, G16):
-//! a zip, a folder, or a single `.vrm`/`.fbx` (whose surrounding folder is
-//! searched too). Avatar files are ranked, the licence text is found next to
+//! a zip, a folder, or a single `.vrm`/`.fbx` (whose own folder is searched
+//! too); `.vrm`/`.fbx` files inside Unity packages count as well. Avatar files are ranked, the licence text is found next to
 //! them (G15), outfit-only inputs are refused (G17), and every choice, with
 //! the runners-up, goes to the report.
 
@@ -22,31 +22,43 @@ pub struct Files {
 /// Files larger than this are skipped when scanning folders (videos, .blend
 /// backups); avatar inputs are far smaller.
 const MAX_FILE: u64 = 200 << 20;
+/// A folder scan reads at most this much in all.
+const MAX_SCAN: u64 = 2 << 30;
 
 impl Files {
-    /// A zip, a folder (recursive), or one file plus the folder two levels
-    /// up, where downloads keep textures and licences beside the model; then
-    /// the file's path inside the result is returned too, as the avatar.
+    /// A zip, a folder (recursive), or one `.vrm`/`.fbx` plus its own folder
+    /// (textures and licences sit beside the model); then the file's path
+    /// inside the result is returned too, as the avatar. Other archives are
+    /// refused with a clear message (RAR, 7z), and a folder scan stops at
+    /// [`MAX_SCAN`] bytes so a stray path can't read a home directory.
     pub fn open(path: &Path) -> Result<(Files, Option<String>)> {
         let mut file = None;
         let lower = path.to_string_lossy().to_lowercase();
+        let ext = lower.rsplit_once('.').map_or("", |(_, e)| e);
+        let mut budget = MAX_SCAN;
         let mut entries = if path.is_dir() {
-            scan(path, path, 6)?
-        } else if lower.ends_with(".zip") {
+            scan(path, path, 6, &mut budget)?
+        } else if ext == "zip" {
             unzip(&std::fs::read(path).with_context(|| format!("reading {}", path.display()))?)?
-        } else {
+        } else if ext == "vrm" || ext == "fbx" {
             let root = path
                 .parent()
-                .and_then(Path::parent)
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or(Path::new("."));
-            let mut e = scan(root, root, 3)?;
+            let mut e = scan(root, root, 3, &mut budget)?;
             let rel = rel_path(root, path);
             if !e.iter().any(|(p, _)| *p == rel) {
                 e.push((rel.clone(), std::fs::read(path)?));
             }
             file = Some(rel);
             e
+        } else if !path.exists() {
+            bail!("{} does not exist", path.display());
+        } else {
+            bail!(
+                "{}: unsupported input (.{ext}); give a .zip, a folder, a .vrm or a .fbx (extract other archives first, G16)",
+                path.display()
+            );
         };
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         Ok((Files { entries }, file))
@@ -78,7 +90,7 @@ pub fn rel_path(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
-fn scan(root: &Path, dir: &Path, depth: usize) -> Result<Vec<(String, Vec<u8>)>> {
+fn scan(root: &Path, dir: &Path, depth: usize, budget: &mut u64) -> Result<Vec<(String, Vec<u8>)>> {
     let mut out = Vec::new();
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .with_context(|| format!("reading {}", dir.display()))?
@@ -90,9 +102,16 @@ fn scan(root: &Path, dir: &Path, depth: usize) -> Result<Vec<(String, Vec<u8>)>>
         let Ok(meta) = e.metadata() else { continue };
         if meta.is_dir() {
             if depth > 0 {
-                out.extend(scan(root, &p, depth - 1)?);
+                out.extend(scan(root, &p, depth - 1, budget)?);
             }
         } else if meta.len() <= MAX_FILE {
+            *budget = budget.checked_sub(meta.len()).with_context(|| {
+                format!(
+                    "{} holds more than {} GB of files; give the avatar's own download folder",
+                    root.display(),
+                    MAX_SCAN >> 30
+                )
+            })?;
             out.push((rel_path(root, &p), std::fs::read(&p)?));
         }
     }
@@ -172,7 +191,13 @@ fn shared(a: &str, b: &str) -> usize {
 /// Licence text for the avatar at `near` (G15): `licen[cs]e`/terms/`規約`
 /// text files before readmes, nearest folder first. PDFs can't be read, so
 /// they are only named.
-pub fn find_licence(files: &Files, near: &str) -> (Option<(String, String)>, Vec<String>) {
+///
+/// `entries` are the download's files plus the text files inside its Unity
+/// packages (`<package>:<asset path>`).
+pub fn find_licence(
+    entries: &[(String, &[u8])],
+    near: &str,
+) -> (Option<(String, String)>, Vec<String>) {
     let rank = |p: &str| -> Option<u8> {
         let b = base(p).to_lowercase();
         let text = [".txt", ".md", ".text"].iter().any(|e| b.ends_with(e)) || !b.contains('.');
@@ -188,8 +213,7 @@ pub fn find_licence(files: &Files, near: &str) -> (Option<(String, String)>, Vec
             None
         }
     };
-    let best = files
-        .entries
+    let best = entries
         .iter()
         .filter_map(|(p, d)| rank(p).map(|r| (r, p, d)))
         .min_by_key(|(r, p, _)| (*r, std::cmp::Reverse(shared(near, p)), p.len()))
@@ -201,8 +225,7 @@ pub fn find_licence(files: &Files, near: &str) -> (Option<(String, String)>, Vec
             let short: String = text.chars().take(600).collect();
             (p.clone(), short)
         });
-    let pdfs: Vec<String> = files
-        .entries
+    let pdfs: Vec<String> = entries
         .iter()
         .map(|(p, _)| p)
         .filter(|p| p.to_lowercase().ends_with(".pdf"))
@@ -231,21 +254,6 @@ pub struct Chosen {
 /// Rank the avatar files in `files` and load the best (G16).
 pub fn choose(files: &Files, o: &Overrides) -> Result<Chosen> {
     let is = |p: &str, ext: &str| p.to_lowercase().ends_with(ext);
-    let mut candidates: Vec<&String> = files
-        .entries
-        .iter()
-        .map(|(p, _)| p)
-        .filter(|p| is(p, ".vrm") || is(p, ".fbx"))
-        .collect();
-    if let Some(a) = &o.avatar {
-        candidates.retain(|p| *p == a || base(p) == a.as_str());
-        if candidates.is_empty() {
-            bail!("no avatar file {a:?} in the input");
-        }
-    }
-    if candidates.is_empty() {
-        bail!("no .vrm or .fbx avatar file in the input (G16)");
-    }
     // Packages: PC before Quest/Android, then by path (G16).
     let mut pkgs: Vec<&String> = files
         .entries
@@ -264,23 +272,78 @@ pub fn choose(files: &Files, o: &Overrides) -> Result<Chosen> {
     };
     pkgs.sort_by_key(|p| (mobile(p), (*p).clone()));
     let mut cache: HashMap<String, Option<Package>> = HashMap::new();
+    for p in &pkgs {
+        cache_pkg(&mut cache, files, p);
+    }
+
+    // Candidates: loose files, then avatar files inside packages (a download
+    // may be only a package, like Saji's) unless a loose copy exists.
+    // (path shown, bytes, the package it lives in)
+    let mut candidates: Vec<(String, &[u8], Option<String>)> = files
+        .entries
+        .iter()
+        .filter(|(p, _)| is(p, ".vrm") || is(p, ".fbx"))
+        .map(|(p, d)| (p.clone(), d.as_slice(), None))
+        .collect();
+    for p in &pkgs {
+        let Some(Some(k)) = cache.get(*p) else {
+            continue;
+        };
+        for a in &k.assets {
+            let Some(d) = &a.data else { continue };
+            if (is(&a.path, ".vrm") || is(&a.path, ".fbx"))
+                && !candidates
+                    .iter()
+                    .any(|(c, _, _)| base(c).eq_ignore_ascii_case(base(&a.path)))
+            {
+                candidates.push((format!("{p}:{}", a.path), d.as_slice(), Some((*p).clone())));
+            }
+        }
+    }
+    if let Some(a) = &o.avatar {
+        candidates.retain(|(p, _, _)| p == a || base(p) == a.as_str());
+        if candidates.is_empty() {
+            bail!("no avatar file {a:?} in the input");
+        }
+    }
+    if candidates.is_empty() {
+        bail!("no .vrm or .fbx avatar file in the input, loose or in a Unity package (G16)");
+    }
     let mut notes = Vec::new();
     let mut ranked: Vec<(i64, String, Avatar)> = Vec::new();
     let mut rejected: Vec<String> = Vec::new();
-    for path in candidates {
-        let bytes = files.get(path).unwrap();
-        let loaded = if is(path, ".vrm") {
+    for (path, bytes, inside) in &candidates {
+        let path = path.clone();
+        let mut own = false;
+        let loaded = if is(&path, ".vrm") {
             vrm::load(bytes)
         } else {
-            // The package holding this FBX by name, else the first (PC first).
-            let pick = pkgs
-                .iter()
-                .find(|p| {
-                    cache_pkg(&mut cache, files, p)
-                        .is_some_and(|k| k.file_by_name(base(path)).is_some())
+            // The package it came from; else the one holding this FBX by
+            // name; else the first (PC first).
+            let by_name = inside.clone().or_else(|| {
+                pkgs.iter()
+                    .find(|p| {
+                        cache
+                            .get(**p)
+                            .and_then(Option::as_ref)
+                            .is_some_and(|k| k.file_by_name(base(&path)).is_some())
+                    })
+                    .map(|p| (*p).clone())
+            });
+            own = by_name.is_some();
+            let pick = inside
+                .clone()
+                .or_else(|| {
+                    pkgs.iter()
+                        .find(|p| {
+                            cache
+                                .get(**p)
+                                .and_then(Option::as_ref)
+                                .is_some_and(|k| k.file_by_name(base(&path)).is_some())
+                        })
+                        .map(|p| (*p).clone())
                 })
-                .or(pkgs.first())
-                .map(|p| (*p).clone());
+                .or(pkgs.first().map(|p| (*p).clone()));
             let package = pick
                 .as_ref()
                 .and_then(|p| cache.get(p))
@@ -288,8 +351,8 @@ pub fn choose(files: &Files, o: &Overrides) -> Result<Chosen> {
             fbx::load(
                 bytes,
                 &fbx::Load {
-                    file_name: base(path).to_string(),
-                    title: stem(path),
+                    file_name: base(&path).to_string(),
+                    title: stem(&path),
                     licence: String::new(),
                     package,
                     variant: o.variant.as_deref(),
@@ -316,7 +379,7 @@ pub fn choose(files: &Files, o: &Overrides) -> Result<Chosen> {
             rejected.push(format!("{path}: {why} (G17)"));
             continue;
         }
-        ranked.push((score(path, &av), path.clone(), av));
+        ranked.push((score(&path, &av, own), path, av));
     }
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     let mut it = ranked.into_iter();
@@ -335,7 +398,24 @@ pub fn choose(files: &Files, o: &Overrides) -> Result<Chosen> {
     }
 
     // Licence (G15): the override, else the VRM's own, else a text file.
-    let (found, pdfs) = find_licence(files, &path);
+    let mut texts: Vec<(String, &[u8])> = files
+        .entries
+        .iter()
+        .map(|(p, d)| (p.clone(), d.as_slice()))
+        .collect();
+    for p in &pkgs {
+        if let Some(Some(k)) = cache.get(*p) {
+            for a in &k.assets {
+                let l = a.path.to_lowercase();
+                if let Some(d) = &a.data
+                    && [".txt", ".md", ".pdf"].iter().any(|e| l.ends_with(e))
+                {
+                    texts.push((format!("{p}:{}", a.path), d.as_slice()));
+                }
+            }
+        }
+    }
+    let (found, pdfs) = find_licence(&texts, &path);
     if let Some(l) = &o.licence {
         av.licence = l.clone();
         notes.push("licence (G15): from --licence".into());
@@ -379,7 +459,9 @@ fn stem(path: &str) -> String {
 /// Higher is better: VRM first (it carries everything); FBX without rim
 /// shells or outline-only materials, the default outfit before alternates,
 /// then more detail.
-fn score(path: &str, av: &Avatar) -> i64 {
+/// `own`: the package holding this FBX is its own (by name or inside it),
+/// so the author's whole Unity setup applies (G18).
+fn score(path: &str, av: &Avatar, own: bool) -> i64 {
     let mut s = 0i64;
     let lower = path.to_lowercase();
     if lower.ends_with(".vrm") {
@@ -391,12 +473,20 @@ fn score(path: &str, av: &Avatar) -> i64 {
     }) {
         s -= 300;
     }
+    // Alternate outfits, by file name; mobile builds anywhere in the path
+    // (`Quest/…/Blondy_QuestVer.fbx` inside `…_QUEST.unitypackage`).
     let file = base(&lower);
-    if ["alt", "alternate", "quest", "android"].iter().any(|w| {
-        file.split(|c: char| !c.is_alphanumeric())
-            .any(|t| t == *w || t.starts_with("alternate"))
-    }) {
+    if file
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|t| t == "alt" || t.starts_with("alternate"))
+    {
         s -= 100;
+    }
+    if lower.contains("quest") || lower.contains("android") {
+        s -= 100;
+    }
+    if own {
+        s += 5;
     }
     let all: usize = av.parts.iter().map(|p| p.triangles.len()).sum();
     s + (all / 1000).min(99) as i64

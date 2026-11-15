@@ -456,8 +456,46 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
         .map(obj_name)
         .collect();
     let bone_refs: Vec<&str> = bone_names.iter().map(String::as_str).collect();
+    // Hierarchy paths (`Armature/hips/spine`), for Unity's hashed fileIDs (G18).
+    let model_name: HashMap<i64, String> = objects
+        .all("Model")
+        .filter_map(|m| Some((m.int(0)?, obj_name(m))))
+        .collect();
+    let mut model_parent: HashMap<i64, i64> = HashMap::new();
+    for c in conns.all("C") {
+        if c.str(0) == Some("OO")
+            && let (Some(ch), Some(pa)) = (c.int(1), c.int(2))
+            && model_name.contains_key(&ch)
+            && model_name.contains_key(&pa)
+        {
+            model_parent.insert(ch, pa);
+        }
+    }
+    let mut model_paths: Vec<String> = model_name
+        .keys()
+        .map(|&id| {
+            let mut v = vec![model_name[&id].as_str()];
+            let mut at = id;
+            while let Some(&pa) = model_parent.get(&at) {
+                v.push(&model_name[&pa]);
+                at = pa;
+                if v.len() > model_name.len() {
+                    break; // a cycle; FBX files shouldn't have one
+                }
+            }
+            v.reverse();
+            v.join("/")
+        })
+        .collect();
+    model_paths.sort();
     let unity = match l.package {
-        Some(p) => Some(unitypkg::settings(p, &l.file_name, &bone_refs, l.variant)?),
+        Some(p) => Some(unitypkg::settings(
+            p,
+            &l.file_name,
+            &bone_refs,
+            &model_paths,
+            l.variant,
+        )?),
         None => None,
     };
     if let Some(u) = &unity {
@@ -555,6 +593,8 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
             }
         }
     }
+    // Nodes skin clusters point at: bones, even when typed Null.
+    let mut skinned: HashSet<usize> = HashSet::new();
     let mut clusters_of: HashMap<i64, Vec<Cluster>> = HashMap::new(); // geometry id →
     for skin in objects.all("Deformer").filter(|d| d.str(2) == Some("Skin")) {
         let sid = skin.int(0).unwrap();
@@ -571,8 +611,11 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
                 .and_then(FNode::floats)
                 .map(from_fbx)
                 .transpose()?;
-            if let (Some(link), Some(&bi)) = (link, index.get(&bone)) {
-                bind.insert(bi, link);
+            if let Some(&bi) = index.get(&bone) {
+                skinned.insert(bi);
+                if let Some(link) = link {
+                    bind.insert(bi, link);
+                }
             }
             let transform = cl
                 .child("Transform")
@@ -838,6 +881,10 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
 
         // Corner → (slot part, vertex index) with exact-match welding.
         let mut slot_parts: BTreeMap<usize, (Part, HashMap<WeldKey, u32>)> = BTreeMap::new();
+        // Unity numbers a renderer's materials by first use in the polygons,
+        // not by FBX connection order (Saji's `Body`); prefab overrides by
+        // slot index need that number (G18).
+        let mut first_use: Vec<usize> = Vec::new();
         let mut poly = Vec::new();
         let mut pi = 0usize;
         for (corner, &raw) in pvi.iter().enumerate() {
@@ -854,6 +901,9 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
                 continue;
             }
             let slot = mat_of_poly(pi);
+            if !first_use.contains(&slot) {
+                first_use.push(slot);
+            }
             let (part, weld) = slot_parts.entry(slot).or_insert_with(|| {
                 (
                     Part {
@@ -915,6 +965,7 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
         }
 
         for (slot, (mut part, _)) in slot_parts {
+            let unity_slot = first_use.iter().position(|&x| x == slot).unwrap_or(slot);
             let mat = slots.get(slot).and_then(|id| materials.get(id));
             let fbx_mat = mat.map_or("?".to_string(), |m| m.name.clone());
             part.material = fbx_mat.clone();
@@ -950,11 +1001,13 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
                 None => None,
             };
             let unity_mat = forced.as_ref().or_else(|| {
-                unity
-                    .as_ref()
-                    .and_then(|u| u.renderer_materials.get(&name))
-                    .and_then(|v| v.get(slot))
-                    .and_then(|m| m.as_ref())
+                unity.as_ref().and_then(|u| {
+                    u.renderer_materials
+                        .get(&name)
+                        .and_then(|v| v.get(unity_slot))
+                        .and_then(|m| m.as_ref())
+                        .or_else(|| mat.and_then(|m| u.remap.get(&m.name)))
+                })
             });
             let colour;
             if let Some(um) = unity_mat {
@@ -969,8 +1022,15 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
                     um.name,
                     if forced.is_some() {
                         "(--material, G12)"
-                    } else {
+                    } else if unity.as_ref().is_some_and(|u| {
+                        u.renderer_materials
+                            .get(&name)
+                            .and_then(|v| v.get(unity_slot))
+                            .is_some_and(Option::is_some)
+                    }) {
                         "(prefab, G2)"
+                    } else {
+                        "(FBX .meta remap, G2)"
                     },
                     if part.image.is_some() {
                         ""
@@ -1086,11 +1146,22 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
     }
     let parts: Vec<Part> = parts.into_iter().map(|p| p.part).collect();
 
-    // Humanoid: Unity's map first, then bone names (G10, G1).
+    // Humanoid: Unity's map first, then bone names (G10, G1). A mesh object
+    // can share a bone's name (Lilyanne's `Head`): skeleton nodes win.
+    let skeletal: Vec<bool> = models
+        .iter()
+        .enumerate()
+        .map(|(i, m)| m.str(2) == Some("LimbNode") || skinned.contains(&i))
+        .collect();
     let by_name: HashMap<&str, usize> = {
         let mut m = HashMap::new();
         for (i, n) in nodes.iter().enumerate().rev() {
-            m.insert(n.name.as_str(), i);
+            match m.get(n.name.as_str()) {
+                Some(&j) if skeletal[j] && !skeletal[i] => {}
+                _ => {
+                    m.insert(n.name.as_str(), i);
+                }
+            }
         }
         m
     };
@@ -1112,7 +1183,7 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
             humanoid.len()
         ));
     } else {
-        humanoid = map_by_name(&nodes);
+        humanoid = map_by_name(&nodes, &skeletal);
         notes.push(format!(
             "humanoid (G1): by bone name, {} bones: {}",
             humanoid.len(),
@@ -1369,7 +1440,9 @@ pub fn triangulate(pts: &[V3]) -> Vec<[usize; 3]> {
 
 /// Humanoid bones by name (G1): case, separators and side markers
 /// (`.L`, `_L`, `Left`, `L_`) are normalised; the shallowest match wins.
-pub fn map_by_name(nodes: &[Node]) -> HashMap<String, usize> {
+/// `skeletal[i]`: node `i` is a bone (LimbNode or skinned to); bones win over
+/// other nodes of the same role, then the shallowest.
+pub fn map_by_name(nodes: &[Node], skeletal: &[bool]) -> HashMap<String, usize> {
     let depth = |mut i: usize| {
         let mut d = 0;
         while let Some(p) = nodes[i].parent {
@@ -1384,7 +1457,7 @@ pub fn map_by_name(nodes: &[Node]) -> HashMap<String, usize> {
         .iter()
         .flatten()
         .any(|(_, b)| b == "upleg" || b == "upperleg" || b == "thigh");
-    let mut out: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut out: HashMap<String, ((bool, usize), usize)> = HashMap::new();
     for (i, p) in parsed.iter().enumerate() {
         let Some((side, base)) = p else { continue };
         let human = match base.as_str() {
@@ -1412,10 +1485,10 @@ pub fn map_by_name(nodes: &[Node]) -> HashMap<String, usize> {
             (None, false) => human.to_string(),
             _ => continue,
         };
-        let d = depth(i);
-        let e = out.entry(key).or_insert((d, i));
-        if d < e.0 {
-            *e = (d, i);
+        let rank = (!skeletal.get(i).copied().unwrap_or(true), depth(i));
+        let e = out.entry(key).or_insert((rank, i));
+        if rank < e.0 {
+            *e = (rank, i);
         }
     }
     out.into_iter().map(|(k, (_, i))| (k, i)).collect()
@@ -1469,6 +1542,24 @@ fn parse_bone(name: &str) -> Option<(Option<char>, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mesh_named_like_a_bone_does_not_take_its_role() {
+        // Lilyanne: a top-level mesh object `Head` and the `Head` bone.
+        let node = |name: &str, parent| Node {
+            name: name.into(),
+            parent,
+            world: crate::math::Xf::IDENTITY,
+        };
+        let nodes = vec![
+            node("Head", None),
+            node("Hips", None),
+            node("Spine", Some(1)),
+            node("Head", Some(2)),
+        ];
+        let m = map_by_name(&nodes, &[false, true, true, true]);
+        assert_eq!(m["head"], 3);
+    }
 
     #[test]
     fn bone_names_parse_with_sides() {

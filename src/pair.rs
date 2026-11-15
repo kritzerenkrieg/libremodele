@@ -196,6 +196,8 @@ pub struct Fit {
     pub seam: Option<f32>,
     /// The candidate is an authored `.mat`.
     pub mat: bool,
+    /// Mean texture colour (sRGB, 0..1) under the part's triangles.
+    pub mean: [f32; 3],
     /// The candidate is marked alternate while the avatar isn't.
     pub alt: bool,
 }
@@ -248,10 +250,32 @@ pub fn fit(part: &Part, material: &str, context: &str, c: &Candidate) -> Option<
         clear: clear as f32 / n_uv as f32,
         seam: seam_fit(part, c),
         mat: c.masked.is_some(),
+        mean: mean_colour(part, c),
         alt: (is_alt(stem(&c.file)) || (c.masked.is_some() && is_alt(&c.name)))
             && !is_alt(material)
             && !is_alt(stem(context)),
     })
+}
+
+/// Mean colour under the part's triangle centres (at most ~2000 sampled).
+fn mean_colour(part: &Part, c: &Candidate) -> [f32; 3] {
+    let step = (part.triangles.len() / 2000).max(1);
+    let (mut sum, mut n) = ([0f32; 3], 0f32);
+    for t in part.triangles.iter().step_by(step) {
+        let uv = t.map(|i| part.uvs[i as usize]);
+        let (u, v) = (
+            (uv[0][0] + uv[1][0] + uv[2][0]) / 3.0,
+            (uv[0][1] + uv[1][1] + uv[2][1]) / 3.0,
+        );
+        let x = ((u.rem_euclid(1.0) * SMALL as f32) as u32).min(SMALL - 1);
+        let y = ((v.rem_euclid(1.0) * SMALL as f32) as u32).min(SMALL - 1);
+        let p = c.small.get_pixel(x, y).0;
+        for k in 0..3 {
+            sum[k] += p[k] as f32 / 255.0;
+        }
+        n += 1.0;
+    }
+    sum.map(|x| x / n.max(1.0))
 }
 
 /// One side of a mesh edge in UV space.

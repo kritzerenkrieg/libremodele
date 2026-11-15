@@ -113,7 +113,9 @@ flowchart LR
 - [x] Licence discovery (G15). Done when: Poka and Miku get their licence text with no `--licence`; Neru warns, Gothic is refused by G17 (check reworded with the user, 2026-11-15)
 - [x] Outfit-only detection (G17). Done when: Gothic stops with a clear message; the five avatars pass (head cover 1.00 for all five vs 0.05 for Gothic)
 - [x] Automatic material pairing (G14, method in G19). Done when: Blindy converts with no `--material` and picks `bodyo.png`; Blondy and Neru unchanged (all three byte-identical to the installed builds, 2026-11-15)
-- [ ] Spike: Unity fileID hash (G18). Done when: G18 has evidence either way
+- [x] Spike: Unity fileID hash (G18). Done when: G18 has evidence either way (XXH64 of `Type:<Class>->//RootNode/root/<path>0`: Neru 36/37, Blondy 36/46, Blindy 13/16; misses explained)
+- [x] Resolve hashed fileIDs (G18 option a). Done when: Neru's 23 material overrides and 2 PhysBones apply; Poka's overrides are held back (their prefabs belong to another FBX, G11) and Blindy keeps `bodyo.png` (`neru_converts`, `poka_*_converts`)
+- [x] Hold-out check on three unseen downloads (Saji, Tsumire, Lilyanne; 2026-11-15). Fixed general faults it found: avatar files inside packages (G16), a mesh named like a bone taking its role, Unity's material slot order for prefab overrides (first use, G18), mobile builds by path, single-file inputs scanning two folders up, licence search inside packages (G15). All three convert with no flags. New questions: G20, G21
 
 ## Cycle: feature and maintenance
 

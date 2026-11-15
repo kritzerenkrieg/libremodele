@@ -228,6 +228,22 @@ fn neru_converts() {
     .unwrap();
     assert_eq!(av.humanoid.len(), 51);
     assert_eq!(av.parts.len(), 23);
+    // G18: the scene's overrides on FBX objects resolve by hashed fileID:
+    // all 23 material slots and both PhysBones (sway, D15).
+    assert!(
+        av.notes
+            .iter()
+            .any(|n| n
+                == "unitypackage: 23 material overrides applied by Unity's hashed fileIDs (G18)"),
+        "{:?}",
+        av.notes
+    );
+    assert!(
+        av.notes
+            .iter()
+            .any(|n| n.contains("FBX material Material.005 → Hair 1.mat (prefab, G2)"))
+    );
+    assert_eq!(av.spring_groups.len(), 2);
     // Feet on the ground, head about 1.2 m up: axes and units (G6).
     let ys = av.parts.iter().flat_map(|p| &p.positions).map(|p| p[1]);
     let (lo, hi) = ys.fold((f32::MAX, f32::MIN), |(a, b), y| (a.min(y), b.max(y)));
@@ -269,7 +285,7 @@ fn gothic_reads() {
         return;
     };
     let pkg = unitypkg::Package::read(&pk).unwrap();
-    let s = unitypkg::settings(&pkg, "Gothic Doll.fbx", &[], None).unwrap();
+    let s = unitypkg::settings(&pkg, "Gothic Doll.fbx", &[], &[], None).unwrap();
     assert!(s.human.is_empty());
     assert_eq!(s.physbones.len(), 16);
     let mut mats: Vec<(String, Vec<String>)> = s
@@ -345,6 +361,16 @@ fn poka(fbx_rel: &str, pkg_rel: &str, materials: &[(&str, &str)]) -> Option<conv
     .unwrap();
     // Unity's map from the matched package FBX (G10, G11): `root` is Hips.
     assert_eq!(av.nodes[av.humanoid["hips"]].name, "root");
+    // G18: the prefab's material overrides belong to the package's FBX, not
+    // this loose one (G11), so they are held back; PhysBones still apply.
+    assert!(
+        av.notes
+            .iter()
+            .any(|n| n.ends_with("3 not (the converted FBX is not the package's own, G11)")),
+        "{:?}",
+        av.notes
+    );
+    assert!(!av.spring_groups.is_empty());
     // Every part textured (no flat colours, no swatch).
     assert!(av.parts.iter().all(|p| p.image.is_some()));
     assert_eq!(av.images.len(), 3);
@@ -548,6 +574,20 @@ fn unzip_reads_stored_and_deflated() {
     let got = source::unzip(&out).unwrap();
     assert_eq!(got[0], ("a/b.txt".to_string(), b"hello".to_vec()));
     assert_eq!(got[1], ("c.txt".to_string(), b"world world world".to_vec()));
+}
+
+#[test]
+fn other_archives_are_refused_clearly() {
+    let dir = std::env::temp_dir().join(format!("libremodele-rar-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("avatar.rar");
+    std::fs::write(&f, b"Rar!").unwrap();
+    let e = source::Files::open(&f).err().unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(
+        format!("{e:#}").contains("unsupported input (.rar)"),
+        "{e:#}"
+    );
 }
 
 #[test]
