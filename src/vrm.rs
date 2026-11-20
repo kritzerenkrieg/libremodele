@@ -27,6 +27,9 @@ pub struct Part {
     pub uvs: Vec<[f32; 2]>,
     /// The node with the largest skin weight, per vertex (D3).
     pub dominant: Vec<usize>,
+    /// Every (node, weight) per vertex, weights summing to 1; used to pose
+    /// the mesh smoothly into the donor's rest pose before binding (G24).
+    pub weights: Vec<Vec<(usize, f32)>>,
     pub triangles: Vec<[u32; 3]>,
     /// Image index of the base colour texture.
     pub image: Option<usize>,
@@ -433,6 +436,7 @@ fn primitive(g: &Glb, p: &Value, node: usize, skin: Option<usize>, nodes: &[Node
     let mut positions = Vec::with_capacity(n);
     let mut normals = Vec::with_capacity(n);
     let mut dominant = Vec::with_capacity(n);
+    let mut weights: Vec<Vec<(usize, f32)>> = Vec::with_capacity(n);
     match (skin, attr("JOINTS_0"), attr("WEIGHTS_0")) {
         (Some(s), Some(ja), Some(wa)) => {
             let js =
@@ -469,6 +473,7 @@ fn primitive(g: &Glb, p: &Value, node: usize, skin: Option<usize>, nodes: &[Node
                 let nn = [nor[v * 3], nor[v * 3 + 1], nor[v * 3 + 2]];
                 let (mut acc_p, mut acc_n, mut best) =
                     ([0.0f32; 3], [0.0f32; 3], (f32::MIN, 0usize));
+                let mut ws: Vec<(usize, f32)> = Vec::new();
                 for k in 0..4 {
                     let w = wv[v * 4 + k];
                     let jk = jv[v * 4 + k] as usize;
@@ -483,10 +488,15 @@ fn primitive(g: &Glb, p: &Value, node: usize, skin: Option<usize>, nodes: &[Node
                     if w > best.0 {
                         best = (w, joints[jk]);
                     }
+                    match ws.iter_mut().find(|x| x.0 == joints[jk]) {
+                        Some(x) => x.1 += w,
+                        None => ws.push((joints[jk], w)),
+                    }
                 }
                 positions.push(acc_p);
                 normals.push(norm(acc_n));
                 dominant.push(best.1);
+                weights.push(normalised(ws, best.1));
             }
         }
         _ => {
@@ -498,7 +508,9 @@ fn primitive(g: &Glb, p: &Value, node: usize, skin: Option<usize>, nodes: &[Node
                     nor[v * 3 + 1],
                     nor[v * 3 + 2],
                 ])));
-                dominant.push(nodes[node].parent.unwrap_or(node));
+                let d = nodes[node].parent.unwrap_or(node);
+                dominant.push(d);
+                weights.push(vec![(d, 1.0)]);
             }
         }
     }
@@ -517,6 +529,7 @@ fn primitive(g: &Glb, p: &Value, node: usize, skin: Option<usize>, nodes: &[Node
         normals,
         uvs,
         dominant,
+        weights,
         triangles,
         image: None,
         unlit: false,
@@ -656,4 +669,17 @@ impl Glb {
             })
             .collect()
     }
+}
+
+/// Weights scaled to sum to 1; `fallback` alone when there are none (G24).
+pub fn normalised(mut ws: Vec<(usize, f32)>, fallback: usize) -> Vec<(usize, f32)> {
+    ws.retain(|x| x.1 > 0.0);
+    let sum: f32 = ws.iter().map(|x| x.1).sum();
+    if sum <= 0.0 {
+        return vec![(fallback, 1.0)];
+    }
+    for x in &mut ws {
+        x.1 /= sum;
+    }
+    ws
 }

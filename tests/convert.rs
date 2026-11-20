@@ -33,6 +33,7 @@ fn lucian_converts() {
             height: None,
             keep: HashMap::new(),
             max_tris: None,
+            keep_polygons: false,
         },
     )
     .unwrap();
@@ -169,6 +170,7 @@ fn miku_converts() {
         height: None,
         keep: HashMap::new(),
         max_tris: None,
+        keep_polygons: false,
     };
     let c = convert::convert(&av, &donor, &opts).unwrap();
     let m = &c.model;
@@ -254,6 +256,7 @@ fn neru_converts() {
         height: None,
         keep: HashMap::new(),
         max_tris: None,
+        keep_polygons: false,
     };
     let c = convert::convert(&av, &donor, &opts).unwrap();
     let m = &c.model;
@@ -270,6 +273,38 @@ fn neru_converts() {
     assert_eq!(mdl::read(&mdl::write(m).unwrap()).unwrap(), *m);
     let again = convert::convert(&av, &donor, &opts).unwrap();
     assert_eq!(again.model, *m);
+    // G27: the fingers curl into a grip (5 fingers × 3 joints × 2 hands).
+    assert!(
+        c.report
+            .iter()
+            .any(|r| r == "hands (G27): 30 finger joints curled into a grip"),
+        "{:?}",
+        c.report
+    );
+    // G24: every vertex keeps its skin weights, summing to 1, for the repose.
+    for p in &av.parts {
+        assert_eq!(p.weights.len(), p.positions.len(), "{}", p.id);
+        for w in &p.weights {
+            let sum: f32 = w.iter().map(|x| x.1).sum();
+            assert!((sum - 1.0).abs() < 1e-4, "{}: {w:?}", p.id);
+        }
+    }
+    // G26: --keep-polygons skips decimation, past the 20k cap, still within
+    // the per-mesh limits.
+    let full = convert::convert(
+        &av,
+        &donor,
+        &convert::Options {
+            keep_polygons: true,
+            ..opts
+        },
+    )
+    .unwrap();
+    assert!(full.model.tri_count() > 50000, "{}", full.model.tri_count());
+    assert!(full.report.iter().any(|r| r.contains("decimation skipped")));
+    for sm in full.model.bodyparts.iter().flat_map(|b| &b.models) {
+        assert!(sm.verts.len() <= convert::MAX_VERTS && sm.norms.len() <= convert::MAX_VERTS);
+    }
 }
 
 /// Gothic Doll's outfit: an unpacked prefab gives `.mat` materials per
@@ -383,6 +418,7 @@ fn poka(fbx_rel: &str, pkg_rel: &str, materials: &[(&str, &str)]) -> Option<conv
             height: None,
             keep: HashMap::new(),
             max_tris: None,
+            keep_polygons: false,
         },
     )
     .unwrap();

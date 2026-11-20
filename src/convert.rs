@@ -4,10 +4,12 @@
 //! donor's rotation channels play unchanged, but takes its bone offsets from
 //! the avatar. Each avatar bone gets a frame `Lfr` in avatar space: origin at
 //! its joint, rotated like the donor bone after aligning the donor's bone
-//! direction with the avatar's. A vertex rigidly bound to that bone (D3) is
-//! stored as `Lfr⁻¹ · p`, so it lands where it was relative to its bone.
-//! Child offsets are the child joint seen from the parent's `Lfr`, which keeps
-//! every joint attached.
+//! direction with the avatar's (limbs only; the torso keeps the avatar's own
+//! posture, G25). Child offsets are the child joint seen from the parent's
+//! `Lfr`, which keeps every joint attached. Each bone's bind → rest map is
+//! `rest · Lfr⁻¹`; a vertex is posed into the donor's rest pose by blending
+//! those maps with its skin weights (G24), then bound rigidly to its dominant
+//! bone (D3) in that bone's rest frame.
 
 use std::collections::{HashMap, HashSet};
 
@@ -91,6 +93,9 @@ pub struct Options {
     pub keep: HashMap<String, bool>,
     /// Triangle budget for lossy reduction (C4, C8); default the 20k engine maximum.
     pub max_tris: Option<usize>,
+    /// Skip lossy decimation and keep every polygon, even past the 20k cap
+    /// (G26, amends C4); lossless reduction still runs.
+    pub keep_polygons: bool,
 }
 
 pub struct Converted {
@@ -274,16 +279,24 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
             .find(|n| mapped.contains_key(n))
     };
 
-    // Each mapped bone's frame in avatar space.
+    // Each mapped bone's frame in avatar space. The torso (pelvis to head)
+    // keeps the avatar's own posture: a donor's spine and neck bones needn't
+    // follow its upright mesh (G25). Limbs align to the donor's directions.
     let mut q: HashMap<&str, M3> = HashMap::new();
     for chain in CHAINS {
         for (i, &n) in chain.iter().enumerate() {
             if !mapped.contains_key(n) {
                 continue;
             }
-            let qn = match next_mapped(chain, i) {
-                Some(a) => M3::align(norm(sub(d_pos(a), d_pos(n))), norm(sub(l_pos(a), l_pos(n)))),
-                None => prev_mapped(chain, i).map_or(M3::IDENTITY, |p| q[p]),
+            let qn = if chain[0] == "Bip01 Pelvis" {
+                M3::IDENTITY
+            } else {
+                match next_mapped(chain, i) {
+                    Some(a) => {
+                        M3::align(norm(sub(d_pos(a), d_pos(n))), norm(sub(l_pos(a), l_pos(n))))
+                    }
+                    None => prev_mapped(chain, i).map_or(M3::IDENTITY, |p| q[p]),
+                }
             };
             q.insert(n, qn);
         }
@@ -609,7 +622,38 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
         });
     }
 
-    // Triangles with rigid bone binding (D3), in model space until reduced.
+    // Grip (G27): curl each finger toward the palm, segment by segment about
+    // its own joint, in bind space; T-posed avatars have their palms down.
+    let curl = finger_curls(av, &to_gs);
+    if !curl.is_empty() {
+        report.push(format!(
+            "hands (G27): {} finger joints curled into a grip",
+            curl.len()
+        ));
+    }
+    let curl_of = |mut n: usize| loop {
+        if let Some(x) = curl.get(&n) {
+            return Some(*x);
+        }
+        n = av.nodes[n].parent?;
+    };
+
+    // Smooth repose (G24): each vertex goes to the donor's rest pose by its
+    // skin weights, blending the bind → rest map of every bone it follows,
+    // so joints bend smoothly before the rigid binding (D3).
+    let rest_of = |part: &crate::vrm::Part, v: usize| -> (V3, V3) {
+        let (p, n) = (to_gs(part.positions[v]), c.apply(part.normals[v]));
+        let (mut ap, mut an) = ([0.0f32; 3], [0.0f32; 3]);
+        for &(node, w) in &part.weights[v] {
+            let m = maps[resolve_in(node, &node_bone)].expect("bound bones have frames");
+            let m = curl_of(node).map_or(m, |k| m.then(&k));
+            ap = crate::math::add(ap, mul(m.apply(p), w));
+            an = crate::math::add(an, mul(m.r.apply(n), w));
+        }
+        (ap, norm(an))
+    };
+
+    // Triangles with rigid bone binding (D3), in the rest pose until reduced.
     let flip = winding_sign(donor) < 0.0;
     use crate::decimate::Vtx as Corner;
     let mut tris: Vec<[Corner; 3]> = Vec::new();
@@ -631,15 +675,18 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
             if flip {
                 idx.swap(1, 2);
             }
-            let corner = |v: usize| Corner {
-                bone: resolve_in(part.dominant[v], &node_bone),
-                tex: ti,
-                p: to_gs(part.positions[v]),
-                n: norm(c.apply(part.normals[v])),
-                st: [
-                    (part.uvs[v][0] * tw).round().clamp(-32768.0, 32767.0) as i16,
-                    (part.uvs[v][1] * th).round().clamp(-32768.0, 32767.0) as i16,
-                ],
+            let corner = |v: usize| {
+                let (p, n) = rest_of(part, v);
+                Corner {
+                    bone: resolve_in(part.dominant[v], &node_bone),
+                    tex: ti,
+                    p,
+                    n,
+                    st: [
+                        (part.uvs[v][0] * tw).round().clamp(-32768.0, 32767.0) as i16,
+                        (part.uvs[v][1] * th).round().clamp(-32768.0, 32767.0) as i16,
+                    ],
+                }
             };
             tris.push([corner(idx[0]), corner(idx[1]), corner(idx[2])]);
         }
@@ -684,8 +731,17 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
 
     // Lossy decimation to the budget (C4, C8), only when over it.
     // Default: the engine maximum (C4); Sven's guidance only warns (A13).
-    let budget = o.max_tris.unwrap_or(MAX_TRIS).min(MAX_TRIS);
     let after_lossless = lossless.len();
+    let budget = if o.keep_polygons {
+        after_lossless
+    } else {
+        o.max_tris.unwrap_or(MAX_TRIS).min(MAX_TRIS)
+    };
+    if o.keep_polygons {
+        report.push(format!(
+            "decimation skipped: --keep-polygons keeps all {after_lossless} triangles (G26)"
+        ));
+    }
     let (mut tris, dst) = crate::decimate::decimate(&lossless, budget);
     if after_lossless > budget {
         report.push(format!(
@@ -729,7 +785,13 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
     ));
     tris.extend(backs);
     if tris.len() > MAX_TRIS {
-        bail!("{} triangles, over the {MAX_TRIS} limit", tris.len());
+        if !o.keep_polygons {
+            bail!("{} triangles, over the {MAX_TRIS} limit", tris.len());
+        }
+        report.push(format!(
+            "warning: {} triangles, over the {MAX_TRIS} cap (C4), kept by --keep-polygons (G26); check that it loads in game",
+            tris.len()
+        ));
     }
     if tris.len() > SVEN_POLY_GUIDE {
         report.push(format!(
@@ -765,11 +827,11 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
         rig.chains.len()
     ));
 
-    // Into each bone's frame.
+    // Into each bone's rest frame (G24: positions are already posed).
     let mut bone_hits = vec![0usize; bones.len()];
     for t in &mut tris {
         for k in t.iter_mut() {
-            let fr = lfr[k.bone].expect("bones that carry vertices have frames");
+            let fr = new_world[k.bone];
             k.p = fr.inverse_rigid().apply(k.p);
             k.n = norm(fr.r.transpose().apply(k.n));
             bone_hits[k.bone] += 1;
@@ -1200,4 +1262,66 @@ pub fn incomplete(av: &Avatar) -> Option<String> {
         )),
         Some(_) => None,
     }
+}
+
+/// Finger curl angles in degrees (proximal, intermediate, distal) for a grip
+/// (G27); the thumb folds less, across the palm.
+const CURL: [(&str, [f32; 3]); 5] = [
+    ("Thumb", [20.0, 25.0, 25.0]),
+    ("Index", [70.0, 85.0, 55.0]),
+    ("Middle", [75.0, 85.0, 55.0]),
+    ("Ring", [80.0, 85.0, 55.0]),
+    ("Little", [85.0, 85.0, 55.0]),
+];
+
+/// Per finger node, the bind-space transform that curls it into a grip,
+/// composed from the knuckle out (G27). Empty when the humanoid map has no
+/// fingers.
+fn finger_curls(av: &Avatar, to_gs: &dyn Fn(V3) -> V3) -> HashMap<usize, Xf> {
+    let key = |want: String| {
+        av.humanoid
+            .iter()
+            .find(|(k, _)| k.replace(' ', "").eq_ignore_ascii_case(&want))
+            .map(|(_, &n)| n)
+    };
+    let palm: V3 = [0.0, 0.0, -1.0];
+    let mut out = HashMap::new();
+    for side in ["left", "right"] {
+        for (finger, angles) in CURL {
+            let joints: Vec<Option<usize>> = ["Proximal", "Intermediate", "Distal"]
+                .iter()
+                .map(|s| key(format!("{side}{finger}{s}")))
+                .collect();
+            let mut acc: Option<Xf> = None;
+            for k in 0..3 {
+                let Some(n) = joints[k] else { break };
+                let j = to_gs(av.nodes[n].world.t);
+                // Segment direction: to the next joint, else the previous one's.
+                let next = joints
+                    .get(k + 1)
+                    .copied()
+                    .flatten()
+                    .or_else(|| (0..av.nodes.len()).find(|&c| av.nodes[c].parent == Some(n)));
+                let d = match next {
+                    Some(c) => norm(sub(to_gs(av.nodes[c].world.t), j)),
+                    None => match k.checked_sub(1).and_then(|p| joints[p]) {
+                        Some(p) => norm(sub(j, to_gs(av.nodes[p].world.t))),
+                        None => break,
+                    },
+                };
+                let side_n = sub(palm, mul(d, dot(palm, d)));
+                if len(side_n) < 1e-3 {
+                    break;
+                }
+                let t = angles[k].to_radians();
+                let bent = crate::math::add(mul(d, t.cos()), mul(norm(side_n), t.sin()));
+                let r = M3::align(d, bent);
+                let rot = Xf::new(r, sub(j, r.apply(j)));
+                let x = acc.map_or(rot, |a| a.then(&rot));
+                out.insert(n, x);
+                acc = Some(x);
+            }
+        }
+    }
+    out
 }

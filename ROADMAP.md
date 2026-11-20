@@ -118,6 +118,10 @@ flowchart LR
 - [x] Hold-out check on three unseen downloads (Saji, Tsumire, Lilyanne; 2026-11-15). Fixed general faults it found: avatar files inside packages (G16), a mesh named like a bone taking its role, Unity's material slot order for prefab overrides (first use, G18), mobile builds by path, single-file inputs scanning two folders up, licence search inside packages (G15). All three convert with no flags. New questions: G20, G21
 - [x] Donor chosen automatically when `--donor` is absent (G22): under 1.4 m real-scale height → chibi donor `samples/yuki_ref`, else Sven's stock `gina` from the Steam install. Check: Lilyanne converts at 75.72 units on gina; neru/blondy/blindy stay on yuki; `downloads_choose` asserts the split.
 - [x] Small separate pieces kept whole by decimation (G23): pieces under 64 triangles, up to a quarter of the budget. Check: Lilyanne's irises survive (100 iris strip vertices, was 0); unit test `small_separate_pieces_stay_whole`.
+- [x] Smooth repose to the donor's rest pose before rigid binding (G24): skin weights kept per vertex by both readers. Check: Lilyanne's arms hang beside her on gina (were a flat wedge inside the dress); Neru on yuki unchanged; `neru_converts` asserts the weights.
+- [x] Torso kept as authored (G25): no alignment on pelvis→head. Check: Saji and Lilyanne stand upright like gina's own idle (were bowed and hunched).
+- [x] `--keep-polygons` (G26): skips lossy decimation past the 20k cap with a warning. Check: Lilyanne keeps all 39,017 triangles in 11 bodyparts and re-reads identically; `neru_converts` asserts it.
+- [x] Fingers curled into a grip during the repose (G27). Check: Sven's `p_9mmhandgun.mdl` bone-merged onto Lilyanne in `ref_aim_onehanded` sits in a fist (was at the wrist past open fingers); `neru_converts` asserts 30 curled joints.
 
 ## Cycle: feature and maintenance
 

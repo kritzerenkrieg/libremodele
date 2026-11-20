@@ -12,6 +12,7 @@ fn main() {
             height: None,
             keep: Default::default(),
             max_tris: None,
+            keep_polygons: false,
         },
     )
     .unwrap();

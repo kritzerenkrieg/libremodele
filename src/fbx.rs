@@ -787,6 +787,7 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
         // Skin: dominant bone per control point (D3), and the bind transform.
         let clusters = clusters_of.get(&gid);
         let mut best = vec![(0.0f64, None::<usize>); ncp];
+        let mut all: Vec<Vec<(usize, f32)>> = vec![Vec::new(); ncp];
         let mut mesh_bind = None;
         for c in clusters.into_iter().flatten() {
             if mesh_bind.is_none() && !c.indexes.is_empty() {
@@ -797,6 +798,14 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
             };
             for (k, &v) in c.indexes.iter().enumerate() {
                 let w = c.weights.get(k).copied().unwrap_or(0.0);
+                if let Some(a) = all.get_mut(v as usize)
+                    && w > 0.0
+                {
+                    match a.iter_mut().find(|x| x.0 == bi) {
+                        Some(x) => x.1 += w as f32,
+                        None => a.push((bi, w as f32)),
+                    }
+                }
                 if let Some(b) = best.get_mut(v as usize)
                     && w > b.0
                 {
@@ -914,6 +923,7 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
                         normals: Vec::new(),
                         uvs: Vec::new(),
                         dominant: Vec::new(),
+                        weights: Vec::new(),
                         triangles: Vec::new(),
                         image: None,
                         unlit: true,
@@ -949,7 +959,10 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
                     part.positions.push(cp_pos(cp));
                     part.normals.push(n);
                     part.uvs.push(uv);
-                    part.dominant.push(best[cp].1.unwrap_or(fallback));
+                    let d = best[cp].1.unwrap_or(fallback);
+                    part.dominant.push(d);
+                    part.weights
+                        .push(crate::vrm::normalised(all[cp].clone(), d));
                     (part.positions.len() - 1) as u32
                 });
                 ids.push(id);

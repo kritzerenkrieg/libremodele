@@ -9,7 +9,7 @@ const USAGE: &str = "usage:
   libremodele convert <download.zip | download.rar | folder | avatar.vrm | avatar.fbx> [--sway]
       optional overrides (A15): [--donor <donor.mdl> (G22)] [--name <name>] [--avatar <file in input>] [--package <x.unitypackage>]
       [--licence <text>] [--variant <prefab>] [--material <fbx material>=<.mat or image>]...
-      [--height <units>] [--max-tris <n>] [--manifest <clean_manifest.json>] [--out <dir>]
+      [--height <units>] [--max-tris <n>] [--keep-polygons (G26)] [--manifest <clean_manifest.json>] [--out <dir>]
   libremodele preview <file.mdl> <out.png>
   libremodele mdl-info <file.mdl>
   libremodele mdl-roundtrip <in.mdl> <out.mdl>";
@@ -148,6 +148,7 @@ fn convert_cmd(input: &str, rest: &[&str]) -> Result<()> {
             height,
             keep,
             max_tris,
+            keep_polygons: rest.contains(&"--keep-polygons"),
         },
     )?;
     let mut c = c;

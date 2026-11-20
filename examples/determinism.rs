@@ -9,6 +9,7 @@ fn main() {
         height: None,
         keep: Default::default(),
         max_tris: None,
+        keep_polygons: false,
     };
     let x = convert::convert(&av, &donor, &o).unwrap().model;
     let y = convert::convert(&av, &donor, &o).unwrap().model;
