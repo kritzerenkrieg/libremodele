@@ -6,8 +6,8 @@ use anyhow::{Context, Result, bail};
 use libremodele::{convert, mdl, preview, source, sway, texture};
 
 const USAGE: &str = "usage:
-  libremodele convert <download.zip | folder | avatar.vrm | avatar.fbx> --donor <donor.mdl> [--sway]
-      optional overrides (A15): [--name <name>] [--avatar <file in input>] [--package <x.unitypackage>]
+  libremodele convert <download.zip | download.rar | folder | avatar.vrm | avatar.fbx> [--sway]
+      optional overrides (A15): [--donor <donor.mdl> (G22)] [--name <name>] [--avatar <file in input>] [--package <x.unitypackage>]
       [--licence <text>] [--variant <prefab>] [--material <fbx material>=<.mat or image>]...
       [--height <units>] [--max-tris <n>] [--manifest <clean_manifest.json>] [--out <dir>]
   libremodele preview <file.mdl> <out.png>
@@ -59,7 +59,6 @@ fn flag<'a>(rest: &[&'a str], name: &str) -> Option<&'a str> {
 }
 
 fn convert_cmd(input: &str, rest: &[&str]) -> Result<()> {
-    let donor_path = flag(rest, "--donor").context("--donor <donor.mdl> is required (D7)")?;
     let height = flag(rest, "--height")
         .map(str::parse::<f32>)
         .transpose()
@@ -131,7 +130,16 @@ fn convert_cmd(input: &str, rest: &[&str]) -> Result<()> {
         bail!("--name must be ASCII letters, digits, _ or -");
     }
     let name = name.as_str();
-    let donor = load(donor_path)?;
+    // G22: --donor overrides; otherwise chosen from the avatar's height.
+    let donor_path = match flag(rest, "--donor") {
+        Some(d) => d.to_string(),
+        None => {
+            let (p, why) = libremodele::donor::choose(&av)?;
+            println!("donor (G22): {} ({why})", p.display());
+            p.to_string_lossy().into_owned()
+        }
+    };
+    let donor = load(&donor_path)?;
     let c = convert::convert(
         &av,
         &donor,

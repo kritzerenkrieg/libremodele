@@ -40,6 +40,8 @@ impl Files {
             scan(path, path, 6, &mut budget)?
         } else if ext == "zip" {
             unzip(&std::fs::read(path).with_context(|| format!("reading {}", path.display()))?)?
+        } else if ext == "rar" {
+            unrar(&std::fs::read(path).with_context(|| format!("reading {}", path.display()))?)?
         } else if ext == "vrm" || ext == "fbx" {
             let root = path
                 .parent()
@@ -56,7 +58,7 @@ impl Files {
             bail!("{} does not exist", path.display());
         } else {
             bail!(
-                "{}: unsupported input (.{ext}); give a .zip, a folder, a .vrm or a .fbx (extract other archives first, G16)",
+                "{}: unsupported input (.{ext}); give a .zip, a .rar, a folder, a .vrm or a .fbx (extract other archives first, G16)",
                 path.display()
             );
         };
@@ -171,6 +173,42 @@ pub fn unzip(d: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
         out.push((name, data));
     }
     Ok(out)
+}
+
+/// RAR (all versions, G21) through the pure-Rust `rars` crate, into memory;
+/// at most [`MAX_SCAN`] bytes in all.
+pub fn unrar(d: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
+    use std::sync::{Arc, Mutex};
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let archive =
+        rars::ArchiveReader::read(d).map_err(|e| anyhow!("not a readable RAR archive: {e}"))?;
+    let mut out: Vec<(String, Arc<Mutex<Vec<u8>>>)> = Vec::new();
+    archive
+        .extract_to_with_options(
+            rars::ArchiveReadOptions::new().with_max_total_output_bytes(MAX_SCAN),
+            |m| {
+                let buf = Arc::new(Mutex::new(Vec::new()));
+                if !m.is_directory {
+                    let name = String::from_utf8_lossy(&m.name).replace('\\', "/");
+                    out.push((name, buf.clone()));
+                }
+                Ok(Box::new(Sink(buf)))
+            },
+        )
+        .map_err(|e| anyhow!("extracting the RAR archive: {e}"))?;
+    Ok(out
+        .into_iter()
+        .map(|(n, b)| (n, std::mem::take(&mut *b.lock().unwrap())))
+        .collect())
 }
 
 fn base(path: &str) -> &str {
@@ -499,7 +537,8 @@ pub const MAX_NAME: usize = 22;
 /// file): lower case, letters, digits and `_`, without a trailing version
 /// (`_v1_6`), at most [`MAX_NAME`] bytes.
 pub fn default_name(input: &Path, avatar: &str) -> String {
-    let from = if input.is_file() && !input.to_string_lossy().to_lowercase().ends_with(".zip") {
+    let lower = input.to_string_lossy().to_lowercase();
+    let from = if input.is_file() && ![".zip", ".rar"].iter().any(|e| lower.ends_with(e)) {
         stem(avatar)
     } else {
         input

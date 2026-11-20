@@ -22,7 +22,7 @@ Read `DECISIONS.md` first. It overrules `ARCHITECTURE.md` and `ROADMAP.md` where
 - Lint: `cargo clippy --all-targets`
 - MDL round trip by hand: `cargo run -- mdl-roundtrip <in.mdl> out/<name>.mdl`
 - Convert the fixture: `cargo run --release -- convert samples/lucian/DrHeart_Lucian_SF/VRM_Lucian_SF.vrm --donor samples/yuki_ref/models/player/yuki_muumuyu/yuki_muumuyu.mdl --name lucian` (outputs in `out/goldsrc/` and `out/review/`)
-- Convert a download (zip or folder; avatar file, package and licence chosen automatically, A15/G16): `cargo run --release -- convert samples/neru --donor samples/yuki_ref/models/player/yuki_muumuyu/yuki_muumuyu.mdl` (`--name`, `--avatar`, `--package`, `--licence`, `--variant`, `--material` are overrides only)
+- Convert a download (zip, rar, folder, .vrm or .fbx; avatar file, package, licence and donor chosen automatically, A15/G16/G22): `cargo run --release -- convert samples/neru` (`--donor`, `--name`, `--avatar`, `--package`, `--licence`, `--variant`, `--material` are overrides only)
 - Preview any MDL: `cargo run --release -- preview <file.mdl> <out.png>`
 
 ## Working loop

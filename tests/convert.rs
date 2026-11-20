@@ -472,6 +472,9 @@ fn downloads_choose() {
             "{dir}: {:?}",
             c.avatar.notes
         );
+        // G22: real-scale height picks the donor.
+        let chibi = libremodele::donor::height(&c.avatar) < libremodele::donor::CHIBI_HEIGHT;
+        assert_eq!(chibi, !matches!(dir, "lucian" | "miku"), "{dir}");
         if dir == "poka_blind" {
             // G14: paired with no `--material`; `bodyo.png`, not the
             // alternate outfit's or `Blindy_Body.mat`'s mismatched atlas.
@@ -578,16 +581,17 @@ fn unzip_reads_stored_and_deflated() {
 
 #[test]
 fn other_archives_are_refused_clearly() {
-    let dir = std::env::temp_dir().join(format!("libremodele-rar-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("libremodele-arc-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let f = dir.join("avatar.rar");
-    std::fs::write(&f, b"Rar!").unwrap();
-    let e = source::Files::open(&f).err().unwrap();
+    let (z7, rar) = (dir.join("avatar.7z"), dir.join("broken.rar"));
+    std::fs::write(&z7, b"7z").unwrap();
+    std::fs::write(&rar, b"not a rar").unwrap();
+    let e7 = format!("{:#}", source::Files::open(&z7).err().unwrap());
+    let er = format!("{:#}", source::Files::open(&rar).err().unwrap());
     std::fs::remove_dir_all(&dir).unwrap();
-    assert!(
-        format!("{e:#}").contains("unsupported input (.rar)"),
-        "{e:#}"
-    );
+    assert!(e7.contains("unsupported input (.7z)"), "{e7}");
+    // RAR is read (G21); a damaged one says so.
+    assert!(er.contains("not a readable RAR archive"), "{er}");
 }
 
 #[test]

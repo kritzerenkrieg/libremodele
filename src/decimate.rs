@@ -54,6 +54,9 @@ pub struct Stats {
     /// Share of the clearance a vertex could move in the last step used
     /// (infinite: caps lifted).
     pub clearance_share: f64,
+    /// Small separate pieces kept whole, and their triangles (G23).
+    pub whole_pieces: usize,
+    pub whole_tris: usize,
 }
 
 /// (lock stage, clearance share) steps, tried in order until the budget is met.
@@ -65,6 +68,39 @@ const STEPS: [(u8, f64); 6] = [
     (2, 0.75),
     (2, f64::INFINITY),
 ];
+/// Separate pieces with fewer triangles than this are never decimated (G23).
+pub const SMALL_PIECE: usize = 64;
+
+/// Per piece root: kept whole. Smallest pieces first, up to a quarter of the
+/// budget, so many small pieces can't block the budget.
+fn small_pieces(
+    layers: &Layers,
+    tris: &[Option<Tri>],
+    target: usize,
+    stats: &mut Stats,
+) -> Vec<bool> {
+    let mut count: HashMap<usize, usize> = HashMap::new();
+    for t in tris.iter().flatten() {
+        *count.entry(layers.piece[t[0].0]).or_default() += 1;
+    }
+    let mut small: Vec<(usize, usize)> = count
+        .into_iter()
+        .filter(|&(_, n)| n < SMALL_PIECE)
+        .map(|(k, n)| (n, k))
+        .collect();
+    small.sort();
+    let mut whole = vec![false; layers.piece.len()];
+    for (n, k) in small {
+        if stats.whole_tris + n > target / 4 {
+            break;
+        }
+        whole[k] = true;
+        stats.whole_pieces += 1;
+        stats.whole_tris += n;
+    }
+    whole
+}
+
 /// Clearances are measured up to this far (game units); beyond, no cap.
 const CLEARANCE_RANGE: f32 = 1.5;
 
@@ -631,7 +667,10 @@ pub fn decimate(input: &[[Vtx; 3]], target: usize) -> (Vec<[Vtx; 3]>, Stats) {
     };
 
     let layers = Layers::new(&m.pos, &m.tris);
+    // Small separate pieces (irises, earrings) stay whole (G23).
+    let whole = small_pieces(&layers, &m.tris, target, &mut stats);
     let origin = split_fins(&mut m);
+    let whole: Vec<bool> = origin.iter().map(|&o| whole[layers.piece[o]]).collect();
     let mut cap: Vec<f64> = (0..m.pos.len())
         .map(|x| f64::from(layers.gap(m.pos[x], layers.piece[origin[x]])))
         .collect();
@@ -711,7 +750,8 @@ pub fn decimate(input: &[[Vtx; 3]], target: usize) -> (Vec<[Vtx; 3]>, Stats) {
             let Some(Entry(_, u, v, s)) = heap.pop() else {
                 break;
             };
-            if s != stamp[u] || m.live(u).is_empty() || m.live(v).is_empty() {
+            if s != stamp[u] || whole[u] || whole[v] || m.live(u).is_empty() || m.live(v).is_empty()
+            {
                 continue;
             }
             let Some(p) = plan(&m, &q, u, v, stage) else {
@@ -847,6 +887,28 @@ mod tests {
         let f = cross(sub(t[1].p, t[0].p), sub(t[2].p, t[0].p));
         let c = [0, 1, 2].map(|k| (t[0].p[k] + t[1].p[k] + t[2].p[k]) / 3.0);
         dot(f, c)
+    }
+
+    #[test]
+    fn small_separate_pieces_stay_whole() {
+        // G23: an iris-sized piece far from a big one keeps every triangle.
+        let mut s = sphere(24, 32);
+        let small: Vec<[Vtx; 3]> = sphere(4, 8)
+            .into_iter()
+            .map(|t| {
+                t.map(|mut v| {
+                    v.p = [v.p[0] * 0.1 + 50.0, v.p[1] * 0.1, v.p[2] * 0.1];
+                    v
+                })
+            })
+            .collect();
+        assert!(small.len() < SMALL_PIECE);
+        s.extend(&small);
+        let (r, st) = decimate(&s, 300);
+        assert!(st.reached, "{st:?}");
+        assert_eq!((st.whole_pieces, st.whole_tris), (1, small.len()));
+        let kept = r.iter().filter(|t| t[0].p[0] > 40.0).count();
+        assert_eq!(kept, small.len());
     }
 
     #[test]

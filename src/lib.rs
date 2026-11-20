@@ -3,6 +3,7 @@
 
 pub mod convert;
 pub mod decimate;
+pub mod donor;
 pub mod fbx;
 pub mod math;
 pub mod mdl;

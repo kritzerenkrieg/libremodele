@@ -116,6 +116,8 @@ flowchart LR
 - [x] Spike: Unity fileID hash (G18). Done when: G18 has evidence either way (XXH64 of `Type:<Class>->//RootNode/root/<path>0`: Neru 36/37, Blondy 36/46, Blindy 13/16; misses explained)
 - [x] Resolve hashed fileIDs (G18 option a). Done when: Neru's 23 material overrides and 2 PhysBones apply; Poka's overrides are held back (their prefabs belong to another FBX, G11) and Blindy keeps `bodyo.png` (`neru_converts`, `poka_*_converts`)
 - [x] Hold-out check on three unseen downloads (Saji, Tsumire, Lilyanne; 2026-11-15). Fixed general faults it found: avatar files inside packages (G16), a mesh named like a bone taking its role, Unity's material slot order for prefab overrides (first use, G18), mobile builds by path, single-file inputs scanning two folders up, licence search inside packages (G15). All three convert with no flags. New questions: G20, G21
+- [x] Donor chosen automatically when `--donor` is absent (G22): under 1.4 m real-scale height → chibi donor `samples/yuki_ref`, else Sven's stock `gina` from the Steam install. Check: Lilyanne converts at 75.72 units on gina; neru/blondy/blindy stay on yuki; `downloads_choose` asserts the split.
+- [x] Small separate pieces kept whole by decimation (G23): pieces under 64 triangles, up to a quarter of the budget. Check: Lilyanne's irises survive (100 iris strip vertices, was 0); unit test `small_separate_pieces_stay_whole`.
 
 ## Cycle: feature and maintenance
 

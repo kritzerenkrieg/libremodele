@@ -689,7 +689,7 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
     let (mut tris, dst) = crate::decimate::decimate(&lossless, budget);
     if after_lossless > budget {
         report.push(format!(
-            "decimation (C8): {after_lossless} → {} triangles for a budget of {budget}; lock stage {} (0 all locked, 1 bone boundaries free, 2 seams and borders slide), moves capped at {} of the gap to a nearby layer ({} vertices near one), {} collapses, max error {:.2} units{}",
+            "decimation (C8): {after_lossless} → {} triangles for a budget of {budget}; lock stage {} (0 all locked, 1 bone boundaries free, 2 seams and borders slide), moves capped at {} of the gap to a nearby layer ({} vertices near one), {} collapses, max error {:.2} units; {} small pieces ({} triangles) kept whole (G23){}",
             tris.len(),
             dst.stage,
             if dst.clearance_share.is_finite() {
@@ -700,6 +700,8 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
             dst.near_layers,
             dst.collapses,
             dst.max_error,
+            dst.whole_pieces,
+            dst.whole_tris,
             if dst.reached { "" } else { "; budget not reached" }
         ));
     }
