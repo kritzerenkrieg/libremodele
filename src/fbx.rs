@@ -12,6 +12,10 @@ use anyhow::{Context, Result, anyhow, bail};
 /// Largest decoded FBX array (bytes): inputs are capped at 200 MB (G16), and a
 /// 65k-triangle avatar's biggest array is a few MB.
 const MAX_ARRAY_BYTES: usize = 512 << 20;
+/// Largest total of decoded arrays kept for one file (bytes, as stored:
+/// every element widens to 8 bytes), so many large arrays can't exhaust
+/// memory either.
+const MAX_DECODED_BYTES: usize = 1 << 30;
 
 use crate::math::{M3, V3, Xf, cross, dot, len, norm, sub};
 use crate::unitypkg::{self, Package};
@@ -106,6 +110,7 @@ pub fn parse(d: &[u8]) -> Result<Vec<FNode>> {
         d,
         o: 27,
         wide: ver >= 7500,
+        budget: MAX_DECODED_BYTES,
     };
     let mut top = Vec::new();
     while let Some(n) = r.node()? {
@@ -118,6 +123,8 @@ struct Reader<'a> {
     d: &'a [u8],
     o: usize,
     wide: bool,
+    /// Decoded-array bytes still allowed (see [`MAX_DECODED_BYTES`]).
+    budget: usize,
 }
 
 impl Reader<'_> {
@@ -209,7 +216,6 @@ impl Reader<'_> {
                 let n = self.u32()? as usize;
                 let enc = self.u32()?;
                 let clen = self.u32()? as usize;
-                let raw = self.take(clen)?;
                 let size = match t {
                     b'f' | b'i' => 4,
                     b'd' | b'l' => 8,
@@ -219,6 +225,12 @@ impl Reader<'_> {
                     .checked_mul(size)
                     .filter(|&b| b <= MAX_ARRAY_BYTES)
                     .with_context(|| format!("FBX array of {n} elements is too large"))?;
+                // Charged as stored (8 bytes per element) before decoding.
+                self.budget = self
+                    .budget
+                    .checked_sub(n * 8)
+                    .context("FBX arrays exceed the total decode limit")?;
+                let raw = self.take(clen)?;
                 let data = match enc {
                     0 => raw.to_vec(),
                     1 => {
@@ -370,7 +382,15 @@ fn normal_matrix(m: &M4) -> M4 {
         m[r1][k1] * m[r2][k2] - m[r1][k2] * m[r2][k1]
     };
     let det = m[0][0] * c(0, 0) + m[0][1] * c(0, 1) + m[0][2] * c(0, 2);
-    let s = if det < 0.0 { -1.0 } else { 1.0 };
+    // Scaled so the largest cofactor is 1: tiny scales don't underflow.
+    let big = (0..9).map(|i| c(i / 3, i % 3).abs()).fold(0.0f64, f64::max);
+    let s = if big == 0.0 || !big.is_finite() {
+        0.0
+    } else if det < 0.0 {
+        -1.0 / big
+    } else {
+        1.0 / big
+    };
     let mut o = I4;
     for (r, row) in o.iter_mut().take(3).enumerate() {
         for (k, v) in row.iter_mut().take(3).enumerate() {
@@ -533,6 +553,11 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
         Some(p) => Some(unitypkg::settings(
             p,
             &l.file_name,
+            // A packaged FBX's path is "<package>:<asset path>".
+            l.path
+                .to_ascii_lowercase()
+                .find(".unitypackage:")
+                .map(|i| &l.path[i + ".unitypackage:".len()..]),
             &bone_refs,
             &model_paths,
             l.variant,
@@ -888,6 +913,17 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
             ),
         );
 
+        let to_world_n = normal_matrix(&to_world);
+        // A mirrored mesh (negative determinant) has its faces turned inside
+        // out; reverse their corners so every part keeps one winding.
+        let mirrored = {
+            let m = &to_world;
+            m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+                - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+                + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+                < 0.0
+        };
+
         // Per-corner attributes.
         let layer = |kind: &str| geo.child(kind);
         let normals = layer("LayerElementNormal");
@@ -1000,7 +1036,6 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
                     HashMap::new(),
                 )
             });
-            let to_world_n = normal_matrix(&to_world);
             let cp_pos = |cp: usize| {
                 f3(apply(
                     &to_world,
@@ -1039,7 +1074,11 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
                 ngons += 1;
             }
             for [a, b, c] in triangulate(&pts) {
-                part.triangles.push([ids[a], ids[b], ids[c]]);
+                part.triangles.push(if mirrored {
+                    [ids[a], ids[c], ids[b]]
+                } else {
+                    [ids[a], ids[b], ids[c]]
+                });
             }
             poly.clear();
             pi += 1;

@@ -328,7 +328,7 @@ fn gothic_reads() {
         return;
     };
     let pkg = unitypkg::Package::read(&pk).unwrap();
-    let s = unitypkg::settings(&pkg, "Gothic Doll.fbx", &[], &[], None).unwrap();
+    let s = unitypkg::settings(&pkg, "Gothic Doll.fbx", None, &[], &[], None).unwrap();
     assert!(s.human.is_empty());
     assert_eq!(s.physbones.len(), 16);
     let mut mats: Vec<(String, Vec<String>)> = s
@@ -679,8 +679,25 @@ fn broken_loose_copy_falls_back_to_package() {
         c.avatar
             .notes
             .iter()
-            .any(|n| n.contains("can't be read; trying the packaged copy")),
+            .any(|n| n.contains("isn't usable; trying the packaged copy")),
         "{:?}",
         c.avatar.notes
     );
+}
+
+#[test]
+fn a_named_package_that_is_missing_is_an_error() {
+    // Neru has a usable loose FBX; naming a package it lacks still fails.
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("samples/neru");
+    if !root.exists() {
+        eprintln!("skipped: no sample folder neru");
+        return;
+    }
+    let (files, _) = source::Files::open(&root).unwrap();
+    let o = source::Overrides {
+        package: Some("nope.unitypackage".into()),
+        ..Default::default()
+    };
+    let e = source::choose(&files, &o).err().expect("an error");
+    assert!(format!("{e:#}").contains("no Unity package"), "{e:#}");
 }

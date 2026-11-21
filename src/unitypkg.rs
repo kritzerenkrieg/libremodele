@@ -219,18 +219,23 @@ pub fn materials(p: &Package) -> Vec<UnityMaterial> {
 pub fn settings(
     p: &Package,
     fbx_name: &str,
+    asset_path: Option<&str>,
     bones: &[&str],
     paths: &[String],
     variant: Option<&str>,
 ) -> Result<Settings> {
     let mut s = Settings::default();
 
-    // The package's copy of this FBX: by file name, else (G11) the FBX whose
-    // `.meta` skeleton shares the most bone names with ours.
-    let by_name = p
-        .assets
-        .iter()
-        .find(|a| base(&a.path).eq_ignore_ascii_case(fbx_name));
+    // The package's copy of this FBX: the asset itself when it was loaded
+    // from this package, else by file name, else (G11) the FBX whose `.meta`
+    // skeleton shares the most bone names with ours.
+    let by_name = match asset_path {
+        Some(ap) => p.assets.iter().find(|a| a.path == ap),
+        None => p
+            .assets
+            .iter()
+            .find(|a| base(&a.path).eq_ignore_ascii_case(fbx_name)),
+    };
     let fbx = by_name.or_else(|| {
             let ours: std::collections::HashSet<&str> = bones.iter().copied().collect();
             p.assets

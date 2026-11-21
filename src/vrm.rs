@@ -506,6 +506,9 @@ fn primitive(g: &Glb, p: &Value, node: usize, skin: Option<usize>, nodes: &[Node
     let set = uv_set(&g.j, p);
     let uv = match attr(&format!("TEXCOORD_{set}")) {
         Some(a) => per_vertex("TEXCOORD", g.accessor_f32(a, 2)?, 2)?,
+        // A texture on UV set n needs TEXCOORD_n; without one it would
+        // sample a single texel.
+        None if set > 0 => bail!("the texture reads TEXCOORD_{set}, which the primitive lacks"),
         None => vec![0.0; n * 2],
     };
     let idx = match p.get("indices").and_then(Value::as_u64) {
@@ -604,11 +607,24 @@ fn primitive(g: &Glb, p: &Value, node: usize, skin: Option<usize>, nodes: &[Node
         }
     }
     let uvs = (0..n).map(|v| [uv[v * 2], uv[v * 2 + 1]]).collect();
+    // An unskinned node with a mirroring transform turns its faces inside
+    // out; reverse their corners so every part keeps one winding.
+    let skinned = matches!(
+        (skin, attr("JOINTS_0"), attr("WEIGHTS_0")),
+        (Some(_), Some(_), Some(_))
+    );
+    let mirrored = !skinned && nodes[node].world.r.det() < 0.0;
     let triangles = idx
         .as_chunks::<3>()
         .0
         .iter()
-        .map(|t| [t[0], t[1], t[2]])
+        .map(|t| {
+            if mirrored {
+                [t[0], t[2], t[1]]
+            } else {
+                [t[0], t[1], t[2]]
+            }
+        })
         .collect();
     Ok(Part {
         id: String::new(),

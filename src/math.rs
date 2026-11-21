@@ -52,8 +52,16 @@ impl M3 {
     pub fn apply(&self, v: V3) -> V3 {
         [dot(self.0[0], v), dot(self.0[1], v), dot(self.0[2], v)]
     }
+    pub fn det(&self) -> f32 {
+        let m = self.0;
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    }
+
     /// The matrix for transforming normals: the inverse transpose up to a
-    /// positive scale (cofactors, signed by the determinant). Normalise after.
+    /// positive scale (cofactors, signed by the determinant, and scaled so
+    /// the largest is 1, so tiny scales don't underflow). Normalise after.
     pub fn normal_matrix(&self) -> M3 {
         let m = self.0;
         let c = |r: usize, k: usize| {
@@ -61,7 +69,11 @@ impl M3 {
             m[r1][k1] * m[r2][k2] - m[r1][k2] * m[r2][k1]
         };
         let det = m[0][0] * c(0, 0) + m[0][1] * c(0, 1) + m[0][2] * c(0, 2);
-        let s = if det < 0.0 { -1.0 } else { 1.0 };
+        let big = (0..9).map(|i| c(i / 3, i % 3).abs()).fold(0.0f32, f32::max);
+        if big == 0.0 || !big.is_finite() {
+            return M3([[0.0; 3]; 3]);
+        }
+        let s = if det < 0.0 { -1.0 } else { 1.0 } / big;
         M3(std::array::from_fn(|r| {
             std::array::from_fn(|k| s * c(r, k))
         }))
@@ -237,6 +249,18 @@ mod tests {
         let b = [-(0.001f32).cos(), (0.001f32).sin(), 0.0];
         let r = M3::align(a, b).apply(a);
         assert!(len(sub(r, b)) < 1e-4, "{r:?}");
+    }
+
+    #[test]
+    fn tiny_scales_keep_normals() {
+        // Uniform scale 1e-7: cofactors of 1e-14 must not underflow to zero.
+        let m = M3([[1e-7, 0.0, 0.0], [0.0, 1e-7, 0.0], [0.0, 0.0, 1e-7]]);
+        let n = norm(m.normal_matrix().apply([0.0, 0.0, 1.0]));
+        assert!((n[2] - 1.0).abs() < 1e-6, "{n:?}");
+        // A mirror flips the sign so the normal stays outside.
+        let m = M3([[-1e-7, 0.0, 0.0], [0.0, 1e-7, 0.0], [0.0, 0.0, 1e-7]]);
+        assert!(m.normal_matrix().apply([1.0, 0.0, 0.0])[0] < 0.0);
+        assert!(m.det() < 0.0);
     }
 
     #[test]

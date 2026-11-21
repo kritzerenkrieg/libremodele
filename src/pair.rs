@@ -117,7 +117,9 @@ impl Candidate {
 }
 
 /// Cells the part's UV triangles touch (UVs wrap; top-left origin).
-fn uv_cells(part: &Part) -> Vec<bool> {
+/// Grid cells under the part's UVs, or `None` when a triangle spans more
+/// texture repeats than the scan covers, so its coverage can't be judged.
+fn uv_cells(part: &Part) -> Option<Vec<bool>> {
     let mut on = vec![false; GRID * GRID];
     let g = GRID as f32;
     for t in &part.triangles {
@@ -135,14 +137,15 @@ fn uv_cells(part: &Part) -> Vec<bool> {
         );
         let area =
             (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
-        // A triangle spanning many texture repeats: cells wrap, so two
-        // repeats' worth of rows and columns already reach every cell it can.
+        // Scanning is capped at two texture repeats per axis; a triangle
+        // wider than that would be clipped, and a clipped mask would claim
+        // less coverage than the triangle has.
         let span = 2 * GRID as i64;
         let (cx0, cy0) = (x0.floor() as i64, y0.floor() as i64);
-        let (cx1, cy1) = (
-            (x1.floor() as i64).min(cx0 + span),
-            (y1.floor() as i64).min(cy0 + span),
-        );
+        let (cx1, cy1) = (x1.floor() as i64, y1.floor() as i64);
+        if !(cx1 - cx0 <= span && cy1 - cy0 <= span) {
+            return None;
+        }
         for cy in cy0..=cy1 {
             for cx in cx0..=cx1 {
                 let (c, r) = (
@@ -159,7 +162,7 @@ fn uv_cells(part: &Part) -> Vec<bool> {
             }
         }
     }
-    on
+    Some(on)
 }
 
 fn inside(p: &[[f32; 2]; 3], q: [f32; 2], area: f32) -> bool {
@@ -255,7 +258,8 @@ pub fn fit(part: &Part, material: &str, context: &str, c: &Candidate) -> Option<
 /// per part, then reused for every candidate (#11).
 pub struct Shape<'p> {
     part: &'p Part,
-    uv: Vec<bool>,
+    /// `None`: the coverage can't be judged (see [`uv_cells`]).
+    uv: Option<Vec<bool>>,
     n_uv: usize,
     seams: Vec<[[f32; 2]; 4]>,
 }
@@ -263,7 +267,7 @@ pub struct Shape<'p> {
 impl<'p> Shape<'p> {
     pub fn of(part: &'p Part) -> Self {
         let uv = uv_cells(part);
-        let n_uv = uv.iter().filter(|&&b| b).count();
+        let n_uv = uv.iter().flatten().filter(|&&b| b).count();
         Shape {
             part,
             uv,
@@ -274,7 +278,8 @@ impl<'p> Shape<'p> {
 }
 
 fn fit_shape(sh: &Shape, material: &str, context: &str, c: &Candidate) -> Option<Fit> {
-    let (part, uv, n_uv) = (sh.part, &sh.uv, sh.n_uv);
+    let (part, n_uv) = (sh.part, sh.n_uv);
+    let uv = sh.uv.as_ref()?;
     if n_uv == 0 {
         return None;
     }
@@ -409,6 +414,12 @@ pub fn choose<'c>(
     cands: &'c [Candidate],
 ) -> Result<(&'c Candidate, Fit, String), String> {
     let shape = Shape::of(part);
+    if shape.uv.is_none() {
+        return Err(
+            "its UVs stretch over more than two texture repeats, so their coverage can't be checked"
+                .into(),
+        );
+    }
     let mut fits: Vec<(usize, Fit)> = cands
         .iter()
         .enumerate()
@@ -442,13 +453,12 @@ pub fn choose<'c>(
             describe(best, &f)
         ));
     }
-    // The runner-up is the best *other image*: the same pixels under another
-    // `.mat` name differ only by name, which the score already weighs.
-    let same = digest(&cands[best].png);
-    let runner = fits
-        .iter()
-        .skip(1)
-        .find(|(i, _)| digest(&cands[*i].png) != same);
+    // The runner-up is the best *other outcome*: the same pixels under another
+    // `.mat` name differ only by name, which the score already weighs; the
+    // same pixels with the other cutout setting are a different result.
+    let outcome = |i: usize| (digest(&cands[i].png), cands[i].masked.unwrap_or(false));
+    let same = outcome(best);
+    let runner = fits.iter().skip(1).find(|(i, _)| outcome(*i) != same);
     if let Some((i, g)) = runner
         && f.score() - g.score() < MIN_MARGIN
     {
@@ -534,4 +544,35 @@ fn digest(d: &[u8]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     d.hash(&mut h);
     h.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tri(uvs: [[f32; 2]; 3]) -> Part {
+        Part {
+            id: String::new(),
+            node_name: String::new(),
+            material: String::new(),
+            positions: vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            uvs: uvs.to_vec(),
+            dominant: vec![0; 3],
+            weights: vec![vec![(0, 1.0)]; 3],
+            triangles: vec![[0, 1, 2]],
+            image: None,
+            unlit: false,
+            masked: false,
+            first_person_only: false,
+        }
+    }
+
+    #[test]
+    fn coverage_is_refused_when_the_scan_would_clip() {
+        // Within two repeats: judged.
+        assert!(uv_cells(&tri([[0.0, 0.0], [0.5, 0.0], [0.0, 0.5]])).is_some());
+        // Four repeats wide and thin: the rows past the cap would be lost.
+        assert!(uv_cells(&tri([[0.0, 0.0], [4.0, 0.0], [4.0, 1.0 / 16.0]])).is_none());
+    }
 }

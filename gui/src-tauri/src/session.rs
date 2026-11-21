@@ -227,18 +227,9 @@ impl Session {
         }
         let root = donor::sven_root().ok_or("Sven Co-op wasn't found")?;
         let m = pipeline::read_mdl(&root.join("svencoop/models").join(file)).map_err(text)?;
-        // The viewer chains bones parent-first; any other order is malformed.
-        if let Some((i, b)) = m
-            .bones
-            .iter()
-            .enumerate()
-            .find(|(i, b)| b.parent >= *i as i32)
-        {
-            return Err(format!(
-                "{file}: bone {i} ({}) has parent {}, not an earlier bone",
-                b.name, b.parent
-            ));
-        }
+        // A malformed model from the game folder mustn't panic the viewer
+        // (and poison the session lock).
+        crate::view::check(&m).map_err(|e| format!("{file}: {e}"))?;
         self.weapon = Some(m);
         Ok(())
     }

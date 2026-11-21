@@ -69,6 +69,55 @@ pub struct HitboxView {
     pub max: [f32; 3],
 }
 
+/// Whether every index [`model_view`] follows is in range: bone parents
+/// come first, and each command's vertex and normal, and their bones, exist.
+/// Models from outside the app (weapons) are checked before viewing.
+pub fn check(m: &Model) -> Result<(), String> {
+    let bones = m.bones.len();
+    if let Some((i, b)) = m
+        .bones
+        .iter()
+        .enumerate()
+        .find(|(i, b)| b.parent >= *i as i32)
+    {
+        return Err(format!(
+            "bone {i} ({}) has parent {}, not an earlier bone",
+            b.name, b.parent
+        ));
+    }
+    for (bi, bp) in m.bodyparts.iter().enumerate() {
+        for sm in &bp.models {
+            if let Some(b) = sm
+                .vert_bones
+                .iter()
+                .chain(&sm.norm_bones)
+                .find(|&&b| b as usize >= bones)
+            {
+                return Err(format!("body part {bi}: bone {b} of {bones}"));
+            }
+            if sm.vert_bones.len() < sm.verts.len() || sm.norm_bones.len() < sm.norms.len() {
+                return Err(format!("body part {bi}: vertices without bones"));
+            }
+            for me in &sm.meshes {
+                for c in &me.commands {
+                    for &[vi, ni, _, _] in &c.verts {
+                        if vi < 0
+                            || vi as usize >= sm.verts.len()
+                            || ni < 0
+                            || ni as usize >= sm.norms.len()
+                        {
+                            return Err(format!(
+                                "body part {bi}: vertex {vi} / normal {ni} out of range"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Everything but the texture pixels and animation frames.
 pub fn model_view(m: &Model, generation: u64) -> ModelView {
     let rest = preview::bone_worlds(m, None);
@@ -241,6 +290,17 @@ mod tests {
 
     /// Unrolled corners keep every triangle, and rest locals chain to the
     /// preview's rest pose.
+    #[test]
+    fn check_refuses_bad_indices() {
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../donors/yuki_muumuyu.mdl");
+        let mut m = libremodele::pipeline::read_mdl(&p).unwrap();
+        assert_eq!(check(&m), Ok(()));
+        let c = &mut m.bodyparts[0].models[0].meshes[0].commands[0];
+        c.verts[0][0] = i16::MAX;
+        assert!(check(&m).unwrap_err().contains("out of range"));
+    }
+
     #[test]
     fn view_matches_preview() {
         let p =

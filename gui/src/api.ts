@@ -84,14 +84,24 @@ export interface ModelView {
 }
 
 export const modelView = (weapon: boolean) => invoke<ModelView>("model_view", { weapon });
+
+/** The backend answers these with raw bytes; anything else (such as a JSON
+ *  fallback) would be misread, so refuse it. */
+async function bytes(cmd: string, args: Record<string, unknown>, unit: number): Promise<ArrayBuffer> {
+  const r = await invoke<unknown>(cmd, args);
+  if (!(r instanceof ArrayBuffer)) throw new Error(`${cmd}: expected binary data from the backend`);
+  if (r.byteLength % unit !== 0) throw new Error(`${cmd}: ${r.byteLength} bytes isn't a multiple of ${unit}`);
+  return r;
+}
+
 export const texture = async (weapon: boolean, generation: number, index: number) =>
-  new Uint8Array(await invoke<ArrayBuffer>("texture", { weapon, generation, index }));
+  new Uint8Array(await bytes("texture", { weapon, generation, index }, 4));
 /** 12 floats per bone per frame: rotation rows, then translation. */
 export const boneFrames = async (
   weapon: boolean,
   generation: number,
   sequence: number | null,
   blend: number,
-) => new Float32Array(await invoke<ArrayBuffer>("bone_frames", { weapon, generation, sequence, blend }));
+) => new Float32Array(await bytes("bone_frames", { weapon, generation, sequence, blend }, 4));
 export const weapons = () => invoke<string[]>("weapons");
 export const loadWeapon = (file: string | null) => invoke<void>("load_weapon", { file });

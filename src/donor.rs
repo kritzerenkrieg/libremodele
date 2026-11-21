@@ -53,7 +53,9 @@ fn windows_steam_path() -> Option<PathBuf> {
     let line = text
         .lines()
         .find(|l| l.trim_start().starts_with("SteamPath"))?;
-    let value = line.split("REG_SZ").nth(1)?.trim();
+    // `SteamPath    REG_SZ    <path>`: split at the first marker only, so a
+    // path that itself contains "REG_SZ" stays whole.
+    let value = line.split_once("REG_SZ")?.1.trim();
     (!value.is_empty()).then(|| PathBuf::from(value.replace('/', "\\")))
 }
 

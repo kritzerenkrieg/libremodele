@@ -35,6 +35,8 @@ export async function build(parent: THREE.Object3D, weapon: boolean, attachTo?: 
     }
   });
 
+  // Bones are attached already: if a texture fails (say, the model changed
+  // meanwhile), take them off again so no half-built rig stays in the scene.
   const textures = await Promise.all(
     view.textures.map(async (t, i) => {
       const tex = new THREE.DataTexture(
@@ -51,7 +53,10 @@ export async function build(parent: THREE.Object3D, weapon: boolean, attachTo?: 
       tex.needsUpdate = true;
       return tex;
     }),
-  );
+  ).catch((e) => {
+    bones.forEach((b) => b.removeFromParent());
+    throw e;
+  });
 
   const skeleton = new THREE.Skeleton(bones, bones.map(() => new THREE.Matrix4()));
   const meshes = view.meshes.map((m) => {

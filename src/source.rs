@@ -291,7 +291,8 @@ pub fn find_licence(
     let best = entries
         .iter()
         .filter_map(|(p, d)| rank(p).map(|r| (r, p, d)))
-        // Same container first (the same Unity package, or both loose), then
+        // The file's name first (licence or terms beat a readme, G15), then
+        // the same container (the same Unity package, or both loose), then
         // the nearest folder, then the shortest path.
         .min_by_key(|(r, p, _)| {
             let other = container(p) != container(near);
@@ -354,6 +355,11 @@ pub fn choose(files: &Files, o: &Overrides) -> Result<Chosen> {
         let l = p.to_lowercase();
         l.contains("quest") || l.contains("android")
     };
+    if let Some(w) = &o.package
+        && pkgs.is_empty()
+    {
+        bail!("no Unity package {w:?} in the input");
+    }
     pkgs.sort_by_key(|p| (mobile(p), (*p).clone()));
     // Read every package once. An unreadable one the user named is an
     // error; others are skipped with a warning, never silently.
@@ -430,7 +436,7 @@ pub fn choose(files: &Files, o: &Overrides) -> Result<Chosen> {
                 continue;
             }
             notes.push(format!(
-                "avatar (G16): {loose} can't be read; trying the packaged copy {path}"
+                "avatar (G16): {loose} isn't usable; trying the packaged copy {path}"
             ));
         }
         let path = path.clone();
@@ -477,10 +483,7 @@ pub fn choose(files: &Files, o: &Overrides) -> Result<Chosen> {
             })
         };
         let av = match loaded {
-            Ok(av) => {
-                loaded_ok.insert(path.clone());
-                av
-            }
+            Ok(av) => av,
             Err(e) => {
                 rejected.push(format!("{path}: {e:#}"));
                 continue;
@@ -490,6 +493,8 @@ pub fn choose(files: &Files, o: &Overrides) -> Result<Chosen> {
             rejected.push(format!("{path}: {why} (G17)"));
             continue;
         }
+        // Usable: a packaged duplicate of it isn't needed.
+        loaded_ok.insert(path.clone());
         ranked.push((score(&path, &av, own), path, av));
     }
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
