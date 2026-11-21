@@ -16,6 +16,9 @@ const MAX_ARRAY_BYTES: usize = 512 << 20;
 /// every element widens to 8 bytes), so many large arrays can't exhaust
 /// memory either.
 const MAX_DECODED_BYTES: usize = 1 << 30;
+/// Deepest node nesting accepted; real files nest under 10 deep, and the
+/// parser recurses per level.
+const MAX_DEPTH: usize = 64;
 
 use crate::math::{M3, V3, Xf, cross, dot, len, norm, sub};
 use crate::unitypkg::{self, Package};
@@ -111,6 +114,7 @@ pub fn parse(d: &[u8]) -> Result<Vec<FNode>> {
         o: 27,
         wide: ver >= 7500,
         budget: MAX_DECODED_BYTES,
+        depth: 0,
     };
     let mut top = Vec::new();
     while let Some(n) = r.node()? {
@@ -123,8 +127,11 @@ struct Reader<'a> {
     d: &'a [u8],
     o: usize,
     wide: bool,
-    /// Decoded-array bytes still allowed (see [`MAX_DECODED_BYTES`]).
+    /// Decoded-array and property bytes still allowed (see
+    /// [`MAX_DECODED_BYTES`]).
     budget: usize,
+    /// Current node nesting (see [`MAX_DEPTH`]).
+    depth: usize,
 }
 
 impl Reader<'_> {
@@ -170,10 +177,19 @@ impl Reader<'_> {
                 end - self.o
             );
         }
+        // The property list itself is memory too: charge it to the budget.
+        self.budget = self
+            .budget
+            .checked_sub(nprops as usize * std::mem::size_of::<Prop>())
+            .context("FBX properties exceed the total decode limit")?;
         let mut props = Vec::with_capacity(nprops as usize);
         for _ in 0..nprops {
             props.push(self.prop()?);
         }
+        if self.depth >= MAX_DEPTH {
+            bail!("FBX node `{name}` is nested more than {MAX_DEPTH} deep");
+        }
+        self.depth += 1;
         let mut children = Vec::new();
         while self.o < end {
             match self.node()? {
@@ -181,6 +197,7 @@ impl Reader<'_> {
                 None => break,
             }
         }
+        self.depth -= 1;
         self.o = end;
         Ok(Some(FNode {
             name,
@@ -1736,6 +1753,26 @@ mod tests {
             })
             .sum();
         assert!((area - 3.0).abs() < 1e-5, "{area}");
+    }
+
+    #[test]
+    fn deep_nesting_is_refused() {
+        // 7.4 header, then 100 nodes each holding the next: no stack overflow.
+        let mut d = b"Kaydara FBX Binary  \0\x1a\0".to_vec();
+        d.extend(7400u32.to_le_bytes());
+        let depth = 100;
+        let total = d.len() + depth * 14 + depth * 13;
+        for i in 0..depth {
+            // Each node ends after its children and their null records.
+            let end = total - i * 13;
+            d.extend((end as u32).to_le_bytes());
+            d.extend([0u8; 8]); // no properties
+            d.push(1);
+            d.push(b'N');
+        }
+        d.extend(std::iter::repeat_n(0u8, depth * 13));
+        let e = parse(&d).expect_err("refused");
+        assert!(format!("{e:#}").contains("nested more than"), "{e:#}");
     }
 
     #[test]

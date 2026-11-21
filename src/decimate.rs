@@ -118,6 +118,9 @@ fn point_segment(p: V3, a: V3, b: V3) -> f32 {
 
 /// Closest distance from `p` to triangle `t` (Ericson, Real-Time Collision
 /// Detection, 5.1.5).
+// Hot in every clearance query; keep it inlined there (a second caller made
+// the compiler stop, costing ~50% of a conversion).
+#[inline(always)]
 fn point_tri(p: V3, t: [V3; 3]) -> f32 {
     let [a, b, c] = t;
     let (ab, ac, ap) = (sub(b, a), sub(c, a), sub(p, a));
@@ -201,31 +204,73 @@ impl Layers {
                 Self::cell([0, 1, 2].map(|k| ps.iter().map(|p| p[k]).fold(f32::MAX, f32::min)));
             let hi =
                 Self::cell([0, 1, 2].map(|k| ps.iter().map(|p| p[k]).fold(f32::MIN, f32::max)));
-            // Only cells the triangle's plane passes through (centre within
-            // half a cell diagonal of it), not the whole bounding box: a long
-            // diagonal face would otherwise fill a volume of cells.
-            let n = cross(sub(ps[1], ps[0]), sub(ps[2], ps[0]));
-            let nl = len(n);
-            let slab = CLEARANCE_RANGE * 0.5 * 3f32.sqrt();
-            for x in lo[0]..=hi[0] {
-                for y in lo[1]..=hi[1] {
-                    for z in lo[2]..=hi[2] {
-                        if nl > 1e-12 {
-                            let centre = [x, y, z].map(|i| (i as f32 + 0.5) * CLEARANCE_RANGE);
-                            if dot(sub(centre, ps[0]), n).abs() / nl > slab {
-                                continue;
-                            }
-                        }
-                        grid.entry([x, y, z]).or_default().push(list.len());
-                    }
-                }
-            }
+            let at = list.len();
+            Self::cells_of(ps, lo, hi, |c| grid.entry(c).or_default().push(at));
             list.push((ps, piece[t[0].0]));
         }
         Layers {
             piece,
             tris: list,
             grid,
+        }
+    }
+
+    /// Cells a triangle may touch: those inside its bounding box whose centre
+    /// is within half a cell diagonal of its plane (of the triangle itself,
+    /// for a degenerate one). Visited along the plane (a few cells per column of
+    /// the dominant axis), so the work and storage follow the triangle's
+    /// area, not its bounding box's volume.
+    fn cells_of(ps: [V3; 3], lo: [i32; 3], hi: [i32; 3], mut out: impl FnMut([i32; 3])) {
+        let r = CLEARANCE_RANGE;
+        let slab = r * 0.5 * 3f32.sqrt();
+        let centre = |c: [i32; 3]| c.map(|i| (i as f32 + 0.5) * r);
+        let near = |c: [i32; 3]| point_tri(centre(c), ps) <= slab;
+        let n = cross(sub(ps[1], ps[0]), sub(ps[2], ps[0]));
+        let nl = len(n);
+        let d = (0..3)
+            .max_by(|&i, &j| n[i].abs().total_cmp(&n[j].abs()))
+            .unwrap_or(2);
+        if nl > 1e-9 && n[d].abs() > 0.0 {
+            let (a, b) = ((d + 1) % 3, (d + 2) % 3);
+            // Along d, the plane is within the slab for this half-width.
+            let tol = slab * nl / n[d].abs();
+            for ia in lo[a]..=hi[a] {
+                for ib in lo[b]..=hi[b] {
+                    let (ca, cb) = ((ia as f32 + 0.5) * r, (ib as f32 + 0.5) * r);
+                    let xd = ps[0][d] - (n[a] * (ca - ps[0][a]) + n[b] * (cb - ps[0][b])) / n[d];
+                    let from = (((xd - tol) / r - 0.5).floor() as i32).max(lo[d]);
+                    let to = (((xd + tol) / r - 0.5).ceil() as i32).min(hi[d]);
+                    // The range already keeps the centre within the slab.
+                    for id in from..=to {
+                        let mut c = [0; 3];
+                        (c[a], c[b], c[d]) = (ia, ib, id);
+                        out(c);
+                    }
+                }
+            }
+        } else {
+            // A degenerate (line-like) triangle: walk its longest edge in
+            // half-cell steps and keep the neighbouring cells near it.
+            let (p, q) = [(ps[0], ps[1]), (ps[1], ps[2]), (ps[2], ps[0])]
+                .into_iter()
+                .max_by(|x, y| len(sub(x.1, x.0)).total_cmp(&len(sub(y.1, y.0))))
+                .expect("three edges");
+            let steps = ((len(sub(q, p)) / (r * 0.5)).ceil() as usize).max(1);
+            let mut seen = HashSet::new();
+            for k in 0..=steps {
+                let t = k as f32 / steps as f32;
+                let c0 = Self::cell([0, 1, 2].map(|i| p[i] + (q[i] - p[i]) * t));
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        for dz in -1..=1 {
+                            let c = [c0[0] + dx, c0[1] + dy, c0[2] + dz];
+                            if seen.insert(c) && near(c) {
+                                out(c);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1101,6 +1146,41 @@ mod tests {
             let c = [0, 1, 2].map(|k| (t[0].p[k] + t[1].p[k] + t[2].p[k]) / 3.0);
             assert!(len(c) > 9.70, "outer surface sank to {}", len(c));
         }
+    }
+
+    #[test]
+    fn grid_cells_follow_the_triangle() {
+        // A long diagonal face: every cell its points fall in is listed, and
+        // far fewer cells than its bounding box holds.
+        let ps = [[0.0, 0.0, 0.0], [60.0, 60.0, 0.0], [0.0, 60.0, 60.0]];
+        let lo = Layers::cell([0.0; 3]);
+        let hi = Layers::cell([60.0; 3]);
+        let mut cells = HashSet::new();
+        Layers::cells_of(ps, lo, hi, |c| {
+            cells.insert(c);
+        });
+        let boxed = (hi[0] - lo[0] + 1).pow(3) as usize;
+        assert!(cells.len() * 10 < boxed, "{} of {boxed}", cells.len());
+        for i in 0..=20 {
+            for j in 0..=(20 - i) {
+                let (u, v) = (i as f32 / 20.0, j as f32 / 20.0);
+                let p = [0, 1, 2]
+                    .map(|k| ps[0][k] + u * (ps[1][k] - ps[0][k]) + v * (ps[2][k] - ps[0][k]));
+                assert!(cells.contains(&Layers::cell(p)), "{p:?}");
+            }
+        }
+        // A degenerate one (all on a line) still covers its segment.
+        let line = [[0.0; 3], [30.0, 0.0, 0.0], [15.0, 0.0, 0.0]];
+        let mut cells = HashSet::new();
+        Layers::cells_of(
+            line,
+            Layers::cell([0.0; 3]),
+            Layers::cell([30.0, 0.0, 0.0]),
+            |c| {
+                cells.insert(c);
+            },
+        );
+        assert!(cells.contains(&Layers::cell([29.0, 0.0, 0.0])));
     }
 
     #[test]
