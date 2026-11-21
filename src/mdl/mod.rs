@@ -12,6 +12,11 @@ pub use bytes::Vec3;
 pub use read::read;
 pub use write::write;
 
+/// Bytes one animation channel takes once run-length encoded.
+pub fn channel_bytes(vals: &[i16]) -> usize {
+    anim::encode(vals).len()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Model {
     pub name: String,

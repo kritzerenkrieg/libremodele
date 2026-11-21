@@ -1,4 +1,19 @@
 //! libremodele: converts VRChat avatars into GoldSrc (and later Source)
 //! playermodels as one standalone program (A1, A7).
 
+pub mod convert;
+pub mod decimate;
+pub mod donor;
+pub mod fbx;
+pub mod math;
 pub mod mdl;
+pub mod pair;
+pub mod pipeline;
+pub mod preview;
+pub mod reduce;
+pub mod source;
+pub mod strip;
+pub mod sway;
+pub mod texture;
+pub mod unitypkg;
+pub mod vrm;

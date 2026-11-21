@@ -1,0 +1,1392 @@
+//! VRM avatar → GoldSrc playermodel, with animations from a donor MDL (D7).
+//!
+//! Retarget (D4): the new skeleton keeps the donor's bone rotations, so the
+//! donor's rotation channels play unchanged, but takes its bone offsets from
+//! the avatar. Each avatar bone gets a frame `Lfr` in avatar space: origin at
+//! its joint, rotated like the donor bone after aligning the donor's bone
+//! direction with the avatar's (limbs only; the torso keeps the avatar's own
+//! posture, G25). Child offsets are the child joint seen from the parent's
+//! `Lfr`, which keeps every joint attached. Each bone's bind → rest map is
+//! `rest · Lfr⁻¹`; a vertex is posed into the donor's rest pose by blending
+//! those maps with its skin weights (G24), then bound rigidly to its dominant
+//! bone (D3) in that bone's rest frame.
+
+use std::collections::{HashMap, HashSet};
+
+use anyhow::{Result, anyhow, bail};
+use serde_json::{Value, json};
+
+use crate::math::{M3, V3, Xf, cross, dot, len, mul, norm, sub};
+use crate::mdl::{Bodypart, Bone, Hitbox, Mesh, Model, SubModel, Texture};
+use crate::preview::{MASKED, bone_worlds, winding_sign};
+use crate::texture;
+use crate::vrm::Avatar;
+
+/// Limits (A11): HL values, which Sven keeps except for textures.
+pub const MAX_BONES: usize = 128;
+/// Vertices, and separately normals, per mesh.
+pub const MAX_VERTS: usize = 2048;
+pub const MAX_TRIS_PER_MESH: usize = 4080;
+pub const MAX_TRIS: usize = 20000;
+/// Sven Co-op playermodel guidance (A11): warn above this.
+pub const SVEN_POLY_GUIDE: usize = 9000;
+/// D6: textures at most 512².
+pub const MAX_TEXTURE: u32 = 512;
+const FLATSHADE: i32 = 0x1;
+
+/// VRM humanoid bone → donor Bip01 bone (D1).
+const HUMANOID: &[(&str, &str)] = &[
+    ("hips", "Bip01 Pelvis"),
+    ("spine", "Bip01 Spine"),
+    ("chest", "Bip01 Spine1"),
+    ("upperChest", "Bip01 Spine2"),
+    ("neck", "Bip01 Neck"),
+    ("head", "Bip01 Head"),
+    ("leftShoulder", "Bip01 L Arm"),
+    ("leftUpperArm", "Bip01 L Arm1"),
+    ("leftLowerArm", "Bip01 L Arm2"),
+    ("leftHand", "Bip01 L Hand"),
+    ("rightShoulder", "Bip01 R Arm"),
+    ("rightUpperArm", "Bip01 R Arm1"),
+    ("rightLowerArm", "Bip01 R Arm2"),
+    ("rightHand", "Bip01 R Hand"),
+    ("leftUpperLeg", "Bip01 L Leg"),
+    ("leftLowerLeg", "Bip01 L Leg1"),
+    ("leftFoot", "Bip01 L Foot"),
+    ("rightUpperLeg", "Bip01 R Leg"),
+    ("rightLowerLeg", "Bip01 R Leg1"),
+    ("rightFoot", "Bip01 R Foot"),
+];
+
+/// Bone chains, root to tip; a bone aims at the next mapped bone in its chain.
+const CHAINS: &[&[&str]] = &[
+    &[
+        "Bip01 Pelvis",
+        "Bip01 Spine",
+        "Bip01 Spine1",
+        "Bip01 Spine2",
+        "Bip01 Spine3",
+        "Bip01 Neck",
+        "Bip01 Head",
+    ],
+    &[
+        "Bip01 L Arm",
+        "Bip01 L Arm1",
+        "Bip01 L Arm2",
+        "Bip01 L Hand",
+    ],
+    &[
+        "Bip01 R Arm",
+        "Bip01 R Arm1",
+        "Bip01 R Arm2",
+        "Bip01 R Hand",
+    ],
+    &["Bip01 L Leg", "Bip01 L Leg1", "Bip01 L Foot"],
+    &["Bip01 R Leg", "Bip01 R Leg1", "Bip01 R Foot"],
+];
+
+pub struct Options {
+    pub name: String,
+    /// Model height in game units; default: the donor's (B8).
+    pub height: Option<f32>,
+    /// Clean-manifest overrides: part id → keep (B4).
+    pub keep: HashMap<String, bool>,
+    /// Triangle budget for lossy reduction (C4, C8); default the 20k engine maximum.
+    pub max_tris: Option<usize>,
+    /// Skip lossy decimation and keep every polygon, even past the 20k cap
+    /// (G26, amends C4); lossless reduction still runs.
+    pub keep_polygons: bool,
+}
+
+pub struct Converted {
+    pub model: Model,
+    pub manifest: Value,
+    pub report: Vec<String>,
+    /// Chain bones and spring parameters for optional sway (D15, D16).
+    pub rig: crate::sway::Rig,
+}
+
+fn is_standard(name: &str) -> bool {
+    name == "Bip01" || CHAINS.iter().any(|c| c.contains(&name))
+}
+
+fn chain_of(name: &str) -> Option<(&'static [&'static str], usize)> {
+    CHAINS
+        .iter()
+        .find_map(|c| c.iter().position(|n| *n == name).map(|i| (*c, i)))
+}
+
+/// Whether a licence text doesn't clearly allow redistribution (A13): empty,
+/// or it prohibits or disallows something.
+pub fn licence_restricted(licence: &str) -> bool {
+    let l = licence.to_lowercase();
+    // Any restriction wins over any grant in the same text.
+    const LIMITS: [&str; 9] = [
+        "prohibit",
+        "disallow",
+        "no redistribution",
+        "not redistribut",
+        "do not redistribut",
+        "don't redistribut",
+        "personal use",
+        "禁止",
+        "再配布不可",
+    ];
+    // Clear grants: VRM's open licences and common permissive terms. (Not
+    // "MIT": terms often name MIT-licensed tools they bundle.)
+    const GRANTS: [&str; 7] = [
+        "redistribution_allowed",
+        "redistribution allowed",
+        "cc0",
+        "cc_by",
+        "cc-by",
+        "cc by",
+        "public domain",
+    ];
+    LIMITS.iter().any(|w| l.contains(w)) || !GRANTS.iter().any(|w| l.contains(w))
+}
+
+pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
+    let mut report = vec![format!("avatar: {:?}, licence {:?}", av.title, av.licence)];
+    report.extend(av.notes.iter().cloned());
+    // A13: warn, don't block.
+    if licence_restricted(&av.licence) {
+        report.push(format!(
+            "warning: licence {:?} does not clearly allow redistribution; a server playermodel is downloaded by every client, so keep this output local (A6, A13)",
+            av.licence
+        ));
+    }
+
+    // Clean (B3, B4): rules, then manifest overrides.
+    let mut manifest = Vec::new();
+    let mut kept = Vec::new();
+    for (i, p) in av.parts.iter().enumerate() {
+        let lower = p.id.to_lowercase();
+        let (keep, rule) = if p.first_person_only {
+            (false, "first-person-only mesh")
+        } else if lower.contains("highlight") || lower.contains("eyehi") || lower.contains("eye_hi")
+        {
+            (false, "eye highlight shell")
+        } else {
+            (true, "")
+        };
+        let keep = o.keep.get(&p.id).copied().unwrap_or(keep);
+        manifest.push(
+            json!({"part": p.id, "keep": keep, "rule": rule, "triangles": p.triangles.len()}),
+        );
+        if keep {
+            kept.push(i);
+        } else {
+            report.push(format!(
+                "dropped part {} ({})",
+                p.id,
+                if rule.is_empty() { "manifest" } else { rule }
+            ));
+        }
+    }
+    if kept.is_empty() {
+        bail!("every mesh part was dropped");
+    }
+
+    // Axes: glTF is Y-up; GoldSrc is X forward, Y left, Z up.
+    let joint = |b: &str| av.humanoid.get(b).map(|&n| av.nodes[n].world.t);
+    let need = |b: &str| joint(b).ok_or_else(|| anyhow!("the VRM has no humanoid `{b}` bone"));
+    let up: V3 = [0.0, 1.0, 0.0];
+    let across = sub(need("leftUpperArm")?, need("rightUpperArm")?);
+    let left = norm(sub(across, mul(up, dot(across, up))));
+    let fwd = norm(cross(left, up));
+    if let (Some(foot), Some(toes)) = (joint("leftFoot"), joint("leftToes"))
+        && dot(sub(toes, foot), fwd) < 0.0
+    {
+        report.push(
+            "warning: the toes point backwards relative to the arms; check the facing".into(),
+        );
+    }
+    // Turn the avatar to face the way the donor's rest pose faces (yuki_ref's
+    // root has a -90° yaw), so the bone frames' twist about the vertical
+    // matches the mesh. Otherwise every pose plays turned sideways.
+    let dw = bone_worlds(donor, None);
+    let dname = |n: &str| {
+        donor
+            .bones
+            .iter()
+            .position(|b| b.name == n)
+            .map(|i| dw[i].t)
+    };
+    let (dla, dra) = (
+        dname("Bip01 L Arm1").ok_or_else(|| anyhow!("the donor has no Bip01 L Arm1"))?,
+        dname("Bip01 R Arm1").ok_or_else(|| anyhow!("the donor has no Bip01 R Arm1"))?,
+    );
+    let d_across = sub(dla, dra);
+    let d_left = norm([d_across[0], d_across[1], 0.0]);
+    let d_fwd = cross(d_left, [0.0, 0.0, 1.0]);
+    let to_donor_facing = M3([
+        [d_fwd[0], d_left[0], 0.0],
+        [d_fwd[1], d_left[1], 0.0],
+        [d_fwd[2], d_left[2], 1.0],
+    ]);
+    let c = to_donor_facing.mul(&M3::rows(fwd, left, up));
+
+    // Scale (B8): match the donor's mesh height unless a height is given.
+    let zs = kept
+        .iter()
+        .flat_map(|&i| &av.parts[i].positions)
+        .map(|p| dot(*p, up));
+    let (lmin, lmax) = zs.fold((f32::MAX, f32::MIN), |(a, b), z| (a.min(z), b.max(z)));
+    let (dmin, dmax) = donor
+        .bodyparts
+        .iter()
+        .filter_map(|b| b.models.first())
+        .flat_map(|sm| {
+            sm.verts
+                .iter()
+                .zip(&sm.vert_bones)
+                .map(|(v, &b)| dw[b as usize].apply(*v)[2])
+        })
+        .fold((f32::MAX, f32::MIN), |(a, b), z| (a.min(z), b.max(z)));
+    let target = o.height.unwrap_or(dmax - dmin);
+    if !(target.is_finite() && target > 0.0) {
+        bail!("the target height must be a positive number of units, not {target}");
+    }
+    if !(lmax - lmin > 1e-6 && (lmax - lmin).is_finite()) {
+        bail!("the avatar has no height (all its vertices are level)");
+    }
+    let s = target / (lmax - lmin);
+    let to_gs = |p: V3| mul(c.apply(p), s);
+    let ground = lmin * s;
+    report.push(format!(
+        "height: avatar {:.3} m → {target:.2} units (scale {s:.3}); donor mesh {:.2} units",
+        lmax - lmin,
+        dmax - dmin
+    ));
+
+    // Donor bones: keep the standard Bip01 set (D2), in donor order.
+    let dindex: HashMap<&str, usize> = donor
+        .bones
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.name.as_str(), i))
+        .collect();
+    let missing: Vec<&str> = CHAINS
+        .iter()
+        .flat_map(|c| c.iter())
+        .chain(std::iter::once(&"Bip01"))
+        .filter(|n| !dindex.contains_key(**n) && **n != "Bip01 Spine2" && **n != "Bip01 Spine3")
+        .copied()
+        .collect();
+    if !missing.is_empty() {
+        bail!("the donor lacks standard bones: {missing:?}");
+    }
+    let kept_donor: Vec<usize> = (0..donor.bones.len())
+        .filter(|&i| is_standard(&donor.bones[i].name))
+        .collect();
+    let dropped: Vec<&str> = donor
+        .bones
+        .iter()
+        .filter(|b| !is_standard(&b.name))
+        .map(|b| b.name.as_str())
+        .collect();
+    report.push(format!("donor bones dropped (D2): {dropped:?}"));
+    let d_pos = |n: &str| dw[dindex[n]].t;
+
+    // Mapped donor bone → avatar node.
+    let mut mapped: HashMap<&str, usize> = HashMap::new();
+    for (vb, db) in HUMANOID {
+        if let (Some(&node), true) = (av.humanoid.get(*vb), dindex.contains_key(db)) {
+            mapped.insert(db, node);
+        }
+    }
+    if !mapped.contains_key("Bip01 Pelvis") {
+        bail!("the VRM has no hips bone");
+    }
+    let l_pos = |n: &str| to_gs(av.nodes[mapped[n]].world.t);
+    let next_mapped = |chain: &[&'static str], i: usize| {
+        chain[i + 1..]
+            .iter()
+            .copied()
+            .find(|n| mapped.contains_key(n))
+    };
+    let prev_mapped = |chain: &[&'static str], i: usize| {
+        chain[..i]
+            .iter()
+            .rev()
+            .copied()
+            .find(|n| mapped.contains_key(n))
+    };
+
+    // Each mapped bone's frame in avatar space. The torso (pelvis to head)
+    // keeps the avatar's own posture: a donor's spine and neck bones needn't
+    // follow its upright mesh (G25). Limbs align to the donor's directions.
+    let mut q: HashMap<&str, M3> = HashMap::new();
+    for chain in CHAINS {
+        for (i, &n) in chain.iter().enumerate() {
+            if !mapped.contains_key(n) {
+                continue;
+            }
+            let qn = if chain[0] == "Bip01 Pelvis" {
+                M3::IDENTITY
+            } else {
+                match next_mapped(chain, i) {
+                    Some(a) => {
+                        M3::align(norm(sub(d_pos(a), d_pos(n))), norm(sub(l_pos(a), l_pos(n))))
+                    }
+                    None => prev_mapped(chain, i).map_or(M3::IDENTITY, |p| q[p]),
+                }
+            };
+            q.insert(n, qn);
+        }
+    }
+    let lfr_of = |n: &str| Xf::new(q[n].mul(&dw[dindex[n]].r), l_pos(n));
+
+    // Root height ratio: the avatar's hips above its feet against the donor's.
+    let dground = dmin;
+    let dhip = d_pos("Bip01 Pelvis")[2] - dground;
+    if dhip <= 1e-3 {
+        bail!("the donor's Bip01 Pelvis is not above its mesh floor; it can't be a donor");
+    }
+    let rp = (l_pos("Bip01 Pelvis")[2] - ground) / dhip;
+    report.push(format!(
+        "hip height ratio {rp:.3} (root motion and pelvis offset scale by it)"
+    ));
+    let seg_ratio = |n: &str, parent: Option<&str>| -> f32 {
+        let Some((chain, i)) = chain_of(n) else {
+            return rp;
+        };
+        let a = prev_mapped(chain, i).or(parent.filter(|p| mapped.contains_key(p)));
+        let b = if mapped.contains_key(n) {
+            Some(n)
+        } else {
+            next_mapped(chain, i)
+        };
+        match (a, b) {
+            (Some(a), Some(b)) => {
+                let d = len(sub(d_pos(b), d_pos(a)));
+                if d > 1e-4 {
+                    len(sub(l_pos(b), l_pos(a))) / d
+                } else {
+                    1.0
+                }
+            }
+            _ => rp,
+        }
+    };
+
+    // New skeleton: kept donor bones first, then avatar extras.
+    let mut bones: Vec<Bone> = Vec::new();
+    let mut new_world: Vec<Xf> = Vec::new();
+    let mut lfr: Vec<Option<Xf>> = Vec::new();
+    let mut maps: Vec<Option<Xf>> = Vec::new();
+    let mut from_donor: Vec<Option<usize>> = Vec::new();
+    let mut donor_to_new: HashMap<usize, usize> = HashMap::new();
+    for &di in &kept_donor {
+        let b = &donor.bones[di];
+        let parent_new = usize::try_from(b.parent)
+            .ok()
+            .map(|p| {
+                donor_to_new
+                    .get(&p)
+                    .copied()
+                    .ok_or_else(|| anyhow!("{}: parent bone was dropped", b.name))
+            })
+            .transpose()?;
+        let donor_off: V3 = [b.value[0], b.value[1], b.value[2]];
+        let pname = usize::try_from(b.parent)
+            .ok()
+            .map(|p| donor.bones[p].name.as_str());
+        let (off, k) = match pname {
+            None => (mul(donor_off, rp), rp),
+            Some(p) if mapped.contains_key(b.name.as_str()) && mapped.contains_key(p) => {
+                let off = lfr_of(p).inverse_rigid().apply(l_pos(&b.name));
+                let dl = len(donor_off);
+                (off, if dl > 1e-4 { len(off) / dl } else { 1.0 })
+            }
+            Some(p) => {
+                let r = seg_ratio(&b.name, Some(p));
+                (mul(donor_off, r), r)
+            }
+        };
+        let mut nb = b.clone();
+        nb.value[..3].copy_from_slice(&off);
+        for v in &mut nb.scale[..3] {
+            *v *= k;
+        }
+        nb.parent = parent_new.map_or(-1, |p| p as i32);
+        let local = Xf::from_gs(&nb.value);
+        let world = parent_new.map_or(local, |p| new_world[p].then(&local));
+        let fr = mapped
+            .contains_key(b.name.as_str())
+            .then(|| lfr_of(&b.name));
+        donor_to_new.insert(di, bones.len());
+        maps.push(fr.map(|f| world.then(&f.inverse_rigid())));
+        lfr.push(fr);
+        new_world.push(world);
+        from_donor.push(Some(di));
+        bones.push(nb);
+    }
+    let pelvis = donor_to_new[&dindex["Bip01 Pelvis"]];
+    let mut node_bone: HashMap<usize, usize> = mapped
+        .iter()
+        .map(|(n, &node)| (node, donor_to_new[&dindex[n]]))
+        .collect();
+    let resolve_in = |node: usize, nb: &HashMap<usize, usize>| {
+        let mut n = Some(node);
+        while let Some(k) = n {
+            if let Some(&b) = nb.get(&k) {
+                return b;
+            }
+            n = av.nodes[k].parent;
+        }
+        pelvis
+    };
+
+    // Extras (D2): spring chains that carry vertices, plus their chain ancestors.
+    let mut used: HashSet<usize> = HashSet::new();
+    for &i in &kept {
+        for &d in &av.parts[i].dominant {
+            let mut n = Some(d);
+            while let Some(k) = n {
+                if !av.spring.contains(&k) || !used.insert(k) {
+                    break;
+                }
+                n = av.nodes[k].parent;
+            }
+        }
+    }
+    let depth = |mut n: usize| {
+        let mut d = 0;
+        while let Some(p) = av.nodes[n].parent {
+            n = p;
+            d += 1;
+        }
+        d
+    };
+    let mut extras: Vec<usize> = used
+        .into_iter()
+        .filter(|n| !node_bone.contains_key(n))
+        .collect();
+    // Bone budget (D2, A11): merge the deepest chain links first, evenly
+    // across chains, until the skeleton fits. A merged link's vertices go to
+    // the nearest kept ancestor; roots and upper links stay, for sway (D15).
+    let room = MAX_BONES.saturating_sub(bones.len());
+    if extras.len() > room {
+        let link = |mut n: usize| {
+            let mut d = 0;
+            while let Some(p) = av.nodes[n].parent.filter(|p| av.spring.contains(p)) {
+                n = p;
+                d += 1;
+            }
+            d
+        };
+        let mut carry: HashMap<usize, usize> = HashMap::new();
+        for &i in &kept {
+            for &d in &av.parts[i].dominant {
+                *carry.entry(d).or_default() += 1;
+            }
+        }
+        // Deepest first; among equals, the link carrying the fewest vertices.
+        extras.sort_by_key(|&n| {
+            (
+                std::cmp::Reverse(link(n)),
+                carry.get(&n).copied().unwrap_or(0),
+                n,
+            )
+        });
+        let merged = extras.len() - room;
+        let names: Vec<String> = extras[..merged]
+            .iter()
+            .map(|&n| av.nodes[n].name.clone())
+            .collect();
+        extras.drain(..merged);
+        report.push(format!(
+            "bone budget (D2): merged {merged} chain links into their parents to fit {MAX_BONES} bones: {names:?}"
+        ));
+    }
+    extras.sort_by_key(|&n| (depth(n), n));
+    for &e in &extras {
+        let parent = av.nodes[e]
+            .parent
+            .map_or(pelvis, |p| resolve_in(p, &node_bone));
+        let m = maps[parent]
+            .ok_or_else(|| anyhow!("{}: parent bone has no avatar frame", av.nodes[e].name))?;
+        let w = av.nodes[e].world;
+        let fr = Xf::new(c.mul(&w.r).mul(&c.transpose()), to_gs(w.t));
+        let world = m.then(&fr);
+        let local = new_world[parent].inverse_rigid().then(&world);
+        let a = local.r.to_gs_angles();
+        let mut name: String = av.nodes[e].name.chars().take(31).collect();
+        if bones.iter().any(|b| b.name == name) {
+            name = format!(
+                "{}_{}",
+                name.chars().take(26).collect::<String>(),
+                bones.len()
+            );
+        }
+        node_bone.insert(e, bones.len());
+        bones.push(Bone {
+            name,
+            parent: parent as i32,
+            flags: 0,
+            controllers: [-1; 6],
+            value: [local.t[0], local.t[1], local.t[2], a[0], a[1], a[2]],
+            scale: [1.0 / 256.0, 1.0 / 256.0, 1.0 / 256.0, 1e-4, 1e-4, 1e-4],
+        });
+        new_world.push(world);
+        lfr.push(Some(fr));
+        maps.push(Some(m));
+        from_donor.push(None);
+    }
+    if bones.len() > MAX_BONES {
+        bail!("{} bones, over the {MAX_BONES} limit", bones.len());
+    }
+    // Sway rig (D15): each chain bone joins the spring group whose root it
+    // descends from; colliders go into their bone's local frame.
+    // Strand of a chain bone: (group, root node it hangs from).
+    let strand_of = |mut n: usize| loop {
+        if let Some(g) = av.spring_groups.iter().position(|g| g.roots.contains(&n)) {
+            return Some((g, n));
+        }
+        n = av.nodes[n].parent?;
+    };
+    let strand: HashMap<usize, (usize, usize)> = extras
+        .iter()
+        .filter_map(|&e| strand_of(e).map(|st| (node_bone[&e], st)))
+        .collect();
+    let mut rig = crate::sway::Rig {
+        units_per_metre: s,
+        tails: extras
+            .iter()
+            .filter_map(|&e| {
+                let b = node_bone[&e];
+                let child = (0..av.nodes.len())
+                    .filter(|&c| av.nodes[c].parent == Some(e) && av.spring.contains(&c))
+                    .min()?;
+                if node_bone.contains_key(&child) {
+                    return None;
+                }
+                let tail = lfr[b]?
+                    .inverse_rigid()
+                    .apply(to_gs(av.nodes[child].world.t));
+                (len(tail) > 1e-3).then_some((b, tail))
+            })
+            .collect(),
+        chains: extras
+            .iter()
+            .filter_map(|&e| strand.get(&node_bone[&e]).map(|&(g, _)| (node_bone[&e], g)))
+            .collect(),
+        groups: av
+            .spring_groups
+            .iter()
+            .map(|g| {
+                let d = c.apply(g.gravity_dir);
+                crate::sway::Group {
+                    name: g.name.clone(),
+                    stiffness: g.stiffness,
+                    gravity_power: g.gravity_power,
+                    gravity_dir: if len(d) > 1e-6 {
+                        norm(d)
+                    } else {
+                        [0.0, 0.0, -1.0]
+                    },
+                    drag: g.drag,
+                    hit_radius: g.hit_radius * s,
+                    colliders: g
+                        .colliders
+                        .iter()
+                        .filter_map(|col| {
+                            let b = resolve_in(col.node, &node_bone);
+                            let fr = lfr[b]?;
+                            let w = to_gs(av.nodes[col.node].world.apply(col.offset));
+                            Some((b, fr.inverse_rigid().apply(w), col.radius * s))
+                        })
+                        .collect(),
+                }
+            })
+            .collect(),
+    };
+    report.push(format!(
+        "bones: {} ({} from the donor, {} avatar chain bones); mapped {:?}",
+        bones.len(),
+        kept_donor.len(),
+        extras.len(),
+        HUMANOID
+            .iter()
+            .filter(|(_, d)| mapped.contains_key(d))
+            .map(|(v, d)| format!("{v}→{d}"))
+            .collect::<Vec<_>>()
+    ));
+
+    // Textures (C5, C6, D6, D10): one GoldSrc texture per (image, masked)
+    // pair, so a texture shared by opaque and cutout materials appears twice.
+    let mut tex_keys: Vec<(usize, bool)> = Vec::new();
+    let mut part_tex: HashMap<usize, usize> = HashMap::new();
+    for &i in &kept {
+        let p = &av.parts[i];
+        let image = p
+            .image
+            .ok_or_else(|| anyhow!("{}: no base colour texture", p.id))?;
+        let k = (image, p.masked);
+        let ti = match tex_keys.iter().position(|x| *x == k) {
+            Some(ti) => ti,
+            None => {
+                tex_keys.push(k);
+                tex_keys.len() - 1
+            }
+        };
+        part_tex.insert(i, ti);
+    }
+    let unlit = kept.iter().all(|&i| av.parts[i].unlit);
+    let mut textures = Vec::new();
+    for (ti, &(image, masked)) in tex_keys.iter().enumerate() {
+        let tex = texture::goldsrc_texture_masked(&av.images[image], MAX_TEXTURE, masked)?;
+        let flags = if unlit { FLATSHADE } else { 0 } | if masked { MASKED } else { 0 };
+        report.push(format!(
+            "texture {ti}: image {image}, {}x{}, flags {}{}",
+            tex.width,
+            tex.height,
+            if unlit { "flatshade (D10)" } else { "none" },
+            if masked { " + masked (C5, D6)" } else { "" }
+        ));
+        let name = if tex_keys.len() == 1 {
+            format!("{}.bmp", o.name)
+        } else {
+            format!("{}_{ti}.bmp", o.name)
+        };
+        textures.push(Texture {
+            name,
+            flags,
+            width: tex.width as i32,
+            height: tex.height as i32,
+            palette: tex.palette_bytes(),
+            pixels: tex.pixels,
+        });
+    }
+
+    // Grip (G27): curl each finger toward the palm, segment by segment about
+    // its own joint, in bind space; T-posed avatars have their palms down.
+    let curl = finger_curls(av, &to_gs);
+    if !curl.is_empty() {
+        report.push(format!(
+            "hands (G27): {} finger joints curled into a grip",
+            curl.len()
+        ));
+    }
+    let curl_of = |mut n: usize| loop {
+        if let Some(x) = curl.get(&n) {
+            return Some(*x);
+        }
+        n = av.nodes[n].parent?;
+    };
+
+    // Smooth repose (G24): each vertex goes to the donor's rest pose by its
+    // skin weights, blending the bind → rest map of every bone it follows,
+    // so joints bend smoothly before the rigid binding (D3).
+    let rest_of = |part: &crate::vrm::Part, v: usize| -> (V3, V3) {
+        let (p, n) = (to_gs(part.positions[v]), c.apply(part.normals[v]));
+        let (mut ap, mut an) = ([0.0f32; 3], [0.0f32; 3]);
+        for &(node, w) in &part.weights[v] {
+            let m = maps[resolve_in(node, &node_bone)].expect("bound bones have frames");
+            let m = curl_of(node).map_or(m, |k| m.then(&k));
+            ap = crate::math::add(ap, mul(m.apply(p), w));
+            an = crate::math::add(an, mul(m.r.apply(n), w));
+        }
+        (ap, norm(an))
+    };
+
+    // Triangles with rigid bone binding (D3), in the rest pose until reduced.
+    let flip = winding_sign(donor) < 0.0;
+    use crate::decimate::Vtx as Corner;
+    let mut tris: Vec<[Corner; 3]> = Vec::new();
+    let mut degenerate = 0;
+    for &pi in &kept {
+        let part = &av.parts[pi];
+        let ti = part_tex[&pi];
+        let (tw, th) = (textures[ti].width as f32, textures[ti].height as f32);
+        for t in &part.triangles {
+            let mut idx = t.map(|v| v as usize);
+            if idx.iter().any(|&v| v >= part.positions.len()) {
+                bail!("{}: index out of range", part.id);
+            }
+            let world: Vec<V3> = idx.iter().map(|&v| to_gs(part.positions[v])).collect();
+            if len(cross(sub(world[1], world[0]), sub(world[2], world[0]))) < 1e-8 {
+                degenerate += 1;
+                continue;
+            }
+            if flip {
+                idx.swap(1, 2);
+            }
+            let corner = |v: usize| {
+                let (p, n) = rest_of(part, v);
+                Corner {
+                    bone: resolve_in(part.dominant[v], &node_bone),
+                    tex: ti,
+                    p,
+                    n,
+                    st: [
+                        (part.uvs[v][0] * tw).round().clamp(-32768.0, 32767.0) as i16,
+                        (part.uvs[v][1] * th).round().clamp(-32768.0, 32767.0) as i16,
+                    ],
+                }
+            };
+            tris.push([corner(idx[0]), corner(idx[1]), corner(idx[2])]);
+        }
+    }
+
+    // Lossless edge collapse per texture (C1, C2, C3).
+    let before_reduce = tris.len();
+    let mut lossless = Vec::new();
+    let mut kept_by: HashMap<crate::reduce::Block, usize> = HashMap::new();
+    for ti in 0..textures.len() {
+        let group: Vec<[crate::reduce::Vtx; 3]> = tris
+            .iter()
+            .filter(|t| t[0].tex == ti)
+            .map(|t| {
+                t.map(|c| crate::reduce::Vtx {
+                    bone: c.bone,
+                    p: c.p,
+                    n: c.n,
+                    st: c.st,
+                })
+            })
+            .collect();
+        let (r, kb) = crate::reduce::reduce_with_stats(&group);
+        for (b, n) in kb {
+            *kept_by.entry(b).or_default() += n;
+        }
+        lossless.extend(r.into_iter().map(|t| {
+            t.map(|v| Corner {
+                bone: v.bone,
+                tex: ti,
+                p: v.p,
+                n: v.n,
+                st: v.st,
+            })
+        }));
+    }
+    let mut kept_by: Vec<_> = kept_by.into_iter().collect();
+    kept_by.sort();
+    report.push(format!(
+        "edge collapse: vertices kept by rule {kept_by:?} (C3)"
+    ));
+
+    // Lossy decimation to the budget (C4, C8), only when over it.
+    // Default: the engine maximum (C4); Sven's guidance only warns (A13).
+    let after_lossless = lossless.len();
+    let budget = if o.keep_polygons {
+        after_lossless
+    } else {
+        o.max_tris.unwrap_or(MAX_TRIS).min(MAX_TRIS)
+    };
+    if o.keep_polygons {
+        report.push(format!(
+            "decimation skipped: --keep-polygons keeps all {after_lossless} triangles (G26)"
+        ));
+    }
+    let (mut tris, dst) = crate::decimate::decimate(&lossless, budget);
+    if after_lossless > budget {
+        report.push(format!(
+            "decimation (C8): {after_lossless} → {} triangles for a budget of {budget}; lock stage {} (0 all locked, 1 bone boundaries free, 2 seams and borders slide), moves capped at {} of the gap to a nearby layer ({} vertices near one), {} collapses, max error {:.2} units; {} small pieces ({} triangles) kept whole (G23){}",
+            tris.len(),
+            dst.stage,
+            if dst.clearance_share.is_finite() {
+                format!("{}×", dst.clearance_share)
+            } else {
+                "no limit".to_string()
+            },
+            dst.near_layers,
+            dst.collapses,
+            dst.max_error,
+            dst.whole_pieces,
+            dst.whole_tris,
+            if dst.reached { "" } else { "; budget not reached" }
+        ));
+    }
+    // D17: back faces for open sheets (skirts, sleeves, hair cards) so they
+    // don't vanish when seen from behind (GoldSrc always culls). Only spare
+    // budget is used, nearest an open edge first.
+    let dist = border_distance(&tris);
+    let mut order: Vec<usize> = (0..tris.len()).filter(|&i| dist[i].is_some()).collect();
+    order.sort_by_key(|&i| (dist[i], i));
+    let open = order.len();
+    // With --keep-polygons the budget is the kept count, so back faces may
+    // still use what is left under the engine cap (G26, D17).
+    let back_cap = if o.keep_polygons { MAX_TRIS } else { budget };
+    order.truncate(back_cap.saturating_sub(tris.len()));
+    let backs: Vec<[Corner; 3]> = order
+        .iter()
+        .map(|&i| {
+            let t = tris[i];
+            [t[0], t[2], t[1]].map(|c| Corner {
+                n: [-c.n[0], -c.n[1], -c.n[2]],
+                ..c
+            })
+        })
+        .collect();
+    report.push(format!(
+        "two-sided (D17): {} of {open} triangles in open pieces get a back face (spare budget, nearest an open edge first)",
+        backs.len()
+    ));
+    tris.extend(backs);
+    if tris.len() > MAX_TRIS {
+        if !o.keep_polygons {
+            bail!("{} triangles, over the {MAX_TRIS} limit", tris.len());
+        }
+        report.push(format!(
+            "warning: {} triangles, over the {MAX_TRIS} cap (C4), kept by --keep-polygons (G26); check that it loads in game",
+            tris.len()
+        ));
+    }
+    if tris.len() > SVEN_POLY_GUIDE {
+        report.push(format!(
+            "warning: {} triangles, over Sven's ~{SVEN_POLY_GUIDE} playermodel guidance (A11)",
+            tris.len()
+        ));
+    }
+
+    // Sway only strands that are separate meshes: a triangle joining two
+    // strands (a skirt's panels, a back-hair sheet) would tear open under
+    // rigid binding (D3) as they swing apart, so those strands stay static.
+    let mut joined: HashSet<(usize, usize)> = HashSet::new();
+    for t in &tris {
+        let st: Vec<(usize, usize)> = t
+            .iter()
+            .filter_map(|k| strand.get(&k.bone).copied())
+            .collect();
+        for a in &st {
+            if st.iter().any(|b| b != a) {
+                joined.insert(*a);
+            }
+        }
+    }
+    rig.chains.retain(|(b, _)| !joined.contains(&strand[b]));
+    let mut joined: Vec<&str> = joined
+        .iter()
+        .map(|&(_, root)| av.nodes[root].name.as_str())
+        .collect();
+    joined.sort();
+    joined.dedup();
+    report.push(format!(
+        "sway rig: {} chain bones can sway; strands kept static because they share triangles with another strand: {joined:?} (D15)",
+        rig.chains.len()
+    ));
+
+    // Into each bone's rest frame (G24: positions are already posed).
+    let mut bone_hits = vec![0usize; bones.len()];
+    for t in &mut tris {
+        for k in t.iter_mut() {
+            let fr = new_world[k.bone];
+            k.p = fr.inverse_rigid().apply(k.p);
+            k.n = norm(fr.r.transpose().apply(k.n));
+            bone_hits[k.bone] += 1;
+        }
+    }
+    tris.sort_by_key(|t| t[0].bone);
+
+    // Weld (C2) and fill bodyparts up to the vertex limits (D5). Each texture
+    // is its own mesh, and GoldSrc lights normals mesh by mesh in file order,
+    // so every mesh keeps its own run of normals.
+    type Key = (usize, [i32; 3]);
+    #[derive(Default)]
+    struct MeshB {
+        norms: Vec<V3>,
+        norm_bones: Vec<u8>,
+        nmap: HashMap<Key, i16>,
+        tris: Vec<[[i16; 4]; 3]>,
+    }
+    struct Part {
+        verts: Vec<V3>,
+        vert_bones: Vec<u8>,
+        vmap: HashMap<Key, i16>,
+        meshes: Vec<MeshB>,
+    }
+    let new_part = || Part {
+        verts: Vec::new(),
+        vert_bones: Vec::new(),
+        vmap: HashMap::new(),
+        meshes: (0..textures.len()).map(|_| MeshB::default()).collect(),
+    };
+    // D12: flatshade ignores most of the normal, so weld normals within ~1°.
+    let nq = if unlit { 57.3 } else { 1e3 };
+    let qkey = |b: usize, v: V3, s: f32| (b, v.map(|x| (x * s).round() as i32));
+    let mut parts: Vec<Part> = vec![new_part()];
+    let mut welded_degenerate = 0;
+    for t in &tris {
+        let ti = t[0].tex;
+        let cur = parts.last().unwrap();
+        let new_v = t
+            .iter()
+            .filter(|k| !cur.vmap.contains_key(&qkey(k.bone, k.p, 1e4)))
+            .count();
+        let new_n = t
+            .iter()
+            .filter(|k| !cur.meshes[ti].nmap.contains_key(&qkey(k.bone, k.n, nq)))
+            .count();
+        let norms: usize = cur.meshes.iter().map(|m| m.norms.len()).sum();
+        if cur.verts.len() + new_v > MAX_VERTS
+            || norms + new_n > MAX_VERTS
+            || cur.meshes[ti].tris.len() + 1 > MAX_TRIS_PER_MESH
+        {
+            parts.push(new_part());
+        }
+        let cur = parts.last_mut().unwrap();
+        let mut cmd = Vec::with_capacity(3);
+        for k in t {
+            let vk = qkey(k.bone, k.p, 1e4);
+            let vi = match cur.vmap.get(&vk) {
+                Some(&i) => i,
+                None => {
+                    let i = cur.verts.len() as i16;
+                    cur.verts.push(k.p);
+                    cur.vert_bones.push(k.bone as u8);
+                    cur.vmap.insert(vk, i);
+                    i
+                }
+            };
+            let mesh = &mut cur.meshes[ti];
+            let nk = qkey(k.bone, k.n, nq);
+            let ni = match mesh.nmap.get(&nk) {
+                Some(&i) => i,
+                None => {
+                    let i = mesh.norms.len() as i16;
+                    mesh.norms.push(k.n);
+                    mesh.norm_bones.push(k.bone as u8);
+                    mesh.nmap.insert(nk, i);
+                    i
+                }
+            };
+            cmd.push([vi, ni, k.st[0], k.st[1]]);
+        }
+        if cmd[0][0] == cmd[1][0] || cmd[1][0] == cmd[2][0] || cmd[0][0] == cmd[2][0] {
+            welded_degenerate += 1;
+            continue;
+        }
+        cur.meshes[ti].tris.push([cmd[0], cmd[1], cmd[2]]);
+    }
+    let total_tris: usize = parts
+        .iter()
+        .flat_map(|p| &p.meshes)
+        .map(|m| m.tris.len())
+        .sum();
+    report.push(format!(
+        "triangles: {} in, {degenerate} zero-area and {welded_degenerate} collapsed by welding dropped, {total_tris} out; zero-error edge collapse {before_reduce} → {after_lossless} (C1)",
+        kept.iter().map(|&i| av.parts[i].triangles.len()).sum::<usize>(),
+    ));
+
+    let bodyparts: Vec<Bodypart> = parts
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let name = if i == 0 {
+                "body".to_string()
+            } else {
+                format!("body{}", i + 1)
+            };
+            let mut norms = Vec::new();
+            let mut norm_bones = Vec::new();
+            let mut meshes = Vec::new();
+            let mut strips = 0;
+            for (ti, mb) in p.meshes.into_iter().enumerate() {
+                if mb.tris.is_empty() {
+                    continue;
+                }
+                let off = norms.len() as i16;
+                let tris: Vec<[[i16; 4]; 3]> = mb
+                    .tris
+                    .iter()
+                    .map(|t| t.map(|[v, n, s, t]| [v, n + off, s, t]))
+                    .collect();
+                let commands = crate::strip::strips(&tris);
+                strips += commands.len();
+                meshes.push(Mesh {
+                    num_tris: tris.len() as i32,
+                    skinref: ti as i32,
+                    num_norms: mb.norms.len() as i32,
+                    norm_index: off as i32,
+                    commands,
+                });
+                norms.extend(mb.norms);
+                norm_bones.extend(mb.norm_bones);
+            }
+            report.push(format!(
+                "bodypart {name}: {} verts, {} normals, {} triangles in {} meshes and {strips} strips",
+                p.verts.len(),
+                norms.len(),
+                meshes.iter().map(|m| m.num_tris).sum::<i32>(),
+                meshes.len()
+            ));
+            Bodypart {
+                name: name.clone(),
+                base: 1,
+                models: vec![SubModel {
+                    name,
+                    kind: 0,
+                    bounding_radius: 0.0,
+                    vert_bones: p.vert_bones,
+                    verts: p.verts,
+                    norm_bones,
+                    norms,
+                    meshes,
+                }],
+            }
+        })
+        .collect();
+
+    // Hitboxes (D14): the donor's set on the bones we keep. Bounds come from
+    // our vertices on that bone, or the donor's box scaled like the bone.
+    let mut bounds: Vec<Option<(V3, V3)>> = vec![None; bones.len()];
+    for bp in &bodyparts {
+        for sm in &bp.models {
+            for (v, &b) in sm.verts.iter().zip(&sm.vert_bones) {
+                let e = bounds[b as usize].get_or_insert((*v, *v));
+                *e = (
+                    std::array::from_fn(|k| e.0[k].min(v[k])),
+                    std::array::from_fn(|k| e.1[k].max(v[k])),
+                );
+            }
+        }
+    }
+    let mut hitboxes = Vec::new();
+    for h in &donor.hitboxes {
+        let di = h.bone as usize;
+        let Some(&nb) = donor_to_new.get(&di) else {
+            continue;
+        };
+        let (bbmin, bbmax) = bounds[nb].unwrap_or_else(|| {
+            let ds = donor.bones[di].scale[0];
+            let k = if ds.abs() > 0.0 {
+                bones[nb].scale[0] / ds
+            } else {
+                1.0
+            };
+            (mul(h.bbmin, k), mul(h.bbmax, k))
+        });
+        hitboxes.push(Hitbox {
+            bone: nb as i32,
+            group: h.group,
+            bbmin,
+            bbmax,
+        });
+    }
+    report.push(format!(
+        "hitboxes: {} of the donor's {} (D14)",
+        hitboxes.len(),
+        donor.hitboxes.len()
+    ));
+
+    // Donor controllers and attachments, re-pointed (D8).
+    let mut controller_map = HashMap::new();
+    let mut bone_controllers = Vec::new();
+    for (ci, bc) in donor.bone_controllers.iter().enumerate() {
+        match donor_to_new.get(&(bc.bone as usize)) {
+            Some(&nb) => {
+                controller_map.insert(ci as i32, bone_controllers.len() as i32);
+                bone_controllers.push(crate::mdl::BoneController {
+                    bone: nb as i32,
+                    ..bc.clone()
+                });
+            }
+            None => report.push(format!(
+                "dropped bone controller {ci} on {}",
+                donor.bones[bc.bone as usize].name
+            )),
+        }
+    }
+    for b in &mut bones {
+        for c in &mut b.controllers {
+            *c = if *c < 0 {
+                -1
+            } else {
+                controller_map.get(c).copied().unwrap_or(-1)
+            };
+        }
+    }
+    let attachments = donor
+        .attachments
+        .iter()
+        .filter_map(|a| {
+            donor_to_new
+                .get(&(a.bone as usize))
+                .map(|&nb| crate::mdl::Attachment {
+                    bone: nb as i32,
+                    ..a.clone()
+                })
+        })
+        .collect::<Vec<_>>();
+    report.push(format!(
+        "controllers {}/{}, attachments {}/{} from the donor",
+        bone_controllers.len(),
+        donor.bone_controllers.len(),
+        attachments.len(),
+        donor.attachments.len()
+    ));
+
+    // Animations (D7): the donor's channels for its kept bones, extras static.
+    let sequences = donor
+        .sequences
+        .iter()
+        .map(|s| {
+            let mut s = s.clone();
+            s.blends = s
+                .blends
+                .iter()
+                .map(|bl| {
+                    from_donor
+                        .iter()
+                        .map(|d| d.map(|di| bl[di].clone()).unwrap_or_default())
+                        .collect()
+                })
+                .collect();
+            s
+        })
+        .collect();
+
+    let path = format!("models/player/{0}/{0}.mdl", o.name);
+    let mut seq_groups = donor.seq_groups.clone();
+    for g in &mut seq_groups {
+        g.name = path.clone();
+    }
+    let model = Model {
+        name: path,
+        eye_position: donor.eye_position,
+        min: donor.min,
+        max: donor.max,
+        bbmin: donor.bbmin,
+        bbmax: donor.bbmax,
+        flags: donor.flags,
+        bones,
+        bone_controllers,
+        hitboxes,
+        sequences,
+        seq_groups,
+        num_skinref: textures.len() as i32,
+        skin_families: vec![(0..textures.len() as i16).collect()],
+        textures,
+        bodyparts,
+        attachments,
+        num_transitions: donor.num_transitions,
+        transitions: donor.transitions.clone(),
+    };
+    let unbound = bone_hits.iter().filter(|&&h| h == 0).count();
+    report.push(format!(
+        "{unbound} bones carry no vertices (expected for spine links, the root and chain joints)"
+    ));
+    Ok(Converted {
+        model,
+        manifest: Value::Array(manifest),
+        report,
+        rig,
+    })
+}
+
+/// Per triangle: hops (across shared edges, by position) to the nearest
+/// triangle with an open edge; None in closed pieces (D17).
+fn border_distance(tris: &[[crate::decimate::Vtx; 3]]) -> Vec<Option<u32>> {
+    let mut id: HashMap<[i32; 3], usize> = HashMap::new();
+    let vid: Vec<[usize; 3]> = tris
+        .iter()
+        .map(|t| {
+            t.map(|c| {
+                let n = id.len();
+                *id.entry(c.p.map(|x| (x * 1e4).round() as i32)).or_insert(n)
+            })
+        })
+        .collect();
+    let mut edges: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    for (ti, v) in vid.iter().enumerate() {
+        for k in 0..3 {
+            let (a, b) = (v[k], v[(k + 1) % 3]);
+            if a != b {
+                edges.entry((a.min(b), a.max(b))).or_default().push(ti);
+            }
+        }
+    }
+    let mut dist: Vec<Option<u32>> = vec![None; tris.len()];
+    let mut queue = std::collections::VecDeque::new();
+    let mut seeds: Vec<usize> = edges
+        .values()
+        .filter(|t| t.len() == 1)
+        .map(|t| t[0])
+        .collect();
+    seeds.sort_unstable();
+    seeds.dedup();
+    for t in seeds {
+        dist[t] = Some(0);
+        queue.push_back(t);
+    }
+    while let Some(t) = queue.pop_front() {
+        let d = dist[t].unwrap() + 1;
+        let v = vid[t];
+        for k in 0..3 {
+            let (a, b) = (v[k], v[(k + 1) % 3]);
+            for &n in edges.get(&(a.min(b), a.max(b))).into_iter().flatten() {
+                if dist[n].is_none() {
+                    dist[n] = Some(d);
+                    queue.push_back(n);
+                }
+            }
+        }
+    }
+    dist
+}
+
+/// How much of the head is surrounded by geometry: the share of rays from
+/// the middle of the head (sideways, and tilted up) that hit a triangle
+/// within a head's reach. A full avatar has a face, skull or hair all round;
+/// an outfit has at most a hat or collar (G17). `None` without a head bone.
+pub fn head_cover(av: &Avatar) -> Option<f32> {
+    let head = *av.humanoid.get("head")?;
+    let (lo, hi) = av
+        .parts
+        .iter()
+        .flat_map(|p| &p.positions)
+        .fold((f32::MAX, f32::MIN), |(l, h), p| (l.min(p[1]), h.max(p[1])));
+    if lo >= hi {
+        return Some(0.0);
+    }
+    let h = hi - lo;
+    let reach = h / 6.0;
+    let c = crate::math::add(av.nodes[head].world.t, [0.0, h / 16.0, 0.0]);
+    let near = |p: V3| len(sub(p, c)) < reach * 1.5;
+    let tris: Vec<[V3; 3]> = av
+        .parts
+        .iter()
+        .flat_map(|p| {
+            p.triangles.iter().filter_map(|t| {
+                let v = t.map(|i| p.positions[i as usize]);
+                v.iter().any(|&q| near(q)).then_some(v)
+            })
+        })
+        .collect();
+    let mut rays = Vec::new();
+    for (k, el) in [(12, 0.0f32), (8, 0.6), (1, 1.5707964)] {
+        for i in 0..k {
+            let a = i as f32 * std::f32::consts::TAU / k as f32;
+            rays.push([el.cos() * a.cos(), el.sin(), el.cos() * a.sin()]);
+        }
+    }
+    let hits = rays
+        .iter()
+        .filter(|&&d| {
+            tris.iter()
+                .any(|t| ray_hit(c, d, t).is_some_and(|s| s < reach))
+        })
+        .count();
+    Some(hits as f32 / rays.len() as f32)
+}
+
+/// Möller–Trumbore, both sides; the distance along `d` (unit) if it hits.
+fn ray_hit(o: V3, d: V3, t: &[V3; 3]) -> Option<f32> {
+    let e1 = sub(t[1], t[0]);
+    let e2 = sub(t[2], t[0]);
+    let p = cross(d, e2);
+    let det = dot(e1, p);
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let s = sub(o, t[0]);
+    let u = dot(s, p) / det;
+    let q = cross(s, e1);
+    let v = dot(d, q) / det;
+    let dist = dot(e2, q) / det;
+    (u >= 0.0 && v >= 0.0 && u + v <= 1.0 && dist > 0.0).then_some(dist)
+}
+
+/// Head cover below this is an outfit, not an avatar (G17).
+pub const MIN_HEAD_COVER: f32 = 0.5;
+
+/// Why `av` can't be a playermodel on its own, if it can't (G17).
+pub fn incomplete(av: &Avatar) -> Option<String> {
+    match head_cover(av) {
+        None => Some("no head bone".into()),
+        Some(c) if c < MIN_HEAD_COVER => Some(format!(
+            "looks like an outfit, not an avatar: only {:.0}% of the head is covered by geometry (need {:.0}%)",
+            c * 100.0,
+            MIN_HEAD_COVER * 100.0
+        )),
+        Some(_) => None,
+    }
+}
+
+/// Finger curl angles in degrees (proximal, intermediate, distal) for a grip
+/// (G27); the thumb folds less, across the palm.
+const CURL: [(&str, [f32; 3]); 5] = [
+    ("Thumb", [20.0, 25.0, 25.0]),
+    ("Index", [70.0, 85.0, 55.0]),
+    ("Middle", [75.0, 85.0, 55.0]),
+    ("Ring", [80.0, 85.0, 55.0]),
+    ("Little", [85.0, 85.0, 55.0]),
+];
+
+/// Per finger node, the bind-space transform that curls it into a grip,
+/// composed from the knuckle out (G27). Empty when the humanoid map has no
+/// fingers.
+fn finger_curls(av: &Avatar, to_gs: &dyn Fn(V3) -> V3) -> HashMap<usize, Xf> {
+    let key = |want: String| {
+        av.humanoid
+            .iter()
+            .find(|(k, _)| k.replace(' ', "").eq_ignore_ascii_case(&want))
+            .map(|(_, &n)| n)
+    };
+    let palm: V3 = [0.0, 0.0, -1.0];
+    let mut out = HashMap::new();
+    for side in ["left", "right"] {
+        for (finger, angles) in CURL {
+            let joints: Vec<Option<usize>> = ["Proximal", "Intermediate", "Distal"]
+                .iter()
+                .map(|s| key(format!("{side}{finger}{s}")))
+                .collect();
+            let mut acc: Option<Xf> = None;
+            for k in 0..3 {
+                let Some(n) = joints[k] else { break };
+                let j = to_gs(av.nodes[n].world.t);
+                // Segment direction: to the next joint, else the previous one's.
+                let next = joints
+                    .get(k + 1)
+                    .copied()
+                    .flatten()
+                    .or_else(|| (0..av.nodes.len()).find(|&c| av.nodes[c].parent == Some(n)));
+                let d = match next {
+                    Some(c) => norm(sub(to_gs(av.nodes[c].world.t), j)),
+                    None => match k.checked_sub(1).and_then(|p| joints[p]) {
+                        Some(p) => norm(sub(j, to_gs(av.nodes[p].world.t))),
+                        None => break,
+                    },
+                };
+                let side_n = sub(palm, mul(d, dot(palm, d)));
+                if len(side_n) < 1e-3 {
+                    break;
+                }
+                let t = angles[k].to_radians();
+                let bent = crate::math::add(mul(d, t.cos()), mul(norm(side_n), t.sin()));
+                let r = M3::align(d, bent);
+                let rot = Xf::new(r, sub(j, r.apply(j)));
+                let x = acc.map_or(rot, |a| a.then(&rot));
+                out.insert(n, x);
+                acc = Some(x);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::licence_restricted;
+
+    #[test]
+    fn licence_needs_a_clear_grant() {
+        for l in [
+            "",
+            "Redistribution_Prohibited",
+            "Personal use only; no redistribution.",
+            "再配布禁止",
+            "Other: https://example.com/terms",
+            "CC_BY but do not redistribute the textures",
+            "Excluding AudioLink, which is MIT licensed.",
+        ] {
+            assert!(licence_restricted(l), "{l:?} should warn");
+        }
+        for l in ["CC0", "CC_BY_NC", "Redistribution_Allowed", "Public domain"] {
+            assert!(!licence_restricted(l), "{l:?} should not warn");
+        }
+    }
+}

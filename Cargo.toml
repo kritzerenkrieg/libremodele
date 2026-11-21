@@ -3,7 +3,25 @@ name = "libremodele"
 version = "0.1.0"
 edition = "2024"
 description = "Standalone converter from VRChat avatars to GoldSrc and Source playermodels"
+license = "MIT"
 publish = false
+
+[workspace]
+# H6: the library + CLI (this crate) and the Tauri GUI.
+members = [".", "gui/src-tauri"]
 
 [dependencies]
 anyhow = "1"
+flate2 = "1.1.11"
+rars = { version = "0.12.4", default-features = false }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+serde_json = "1.0.154"
+
+# Sample tests decimate a 65k-triangle avatar twice (C8); unoptimised that
+# takes minutes.
+[profile.test]
+opt-level = 2
+
+# The GUI's dev builds (`npm run tauri dev`) still convert at full speed.
+[profile.dev.package.libremodele]
+opt-level = 3
