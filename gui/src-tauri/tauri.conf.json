@@ -11,9 +11,42 @@
   },
   "app": {
     "windows": [
-      { "title": "libremodele", "width": 1200, "height": 800, "minWidth": 900, "minHeight": 600, "dragDropEnabled": true }
+      {
+        "title": "libremodele",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "dragDropEnabled": true
+      }
     ],
-    "security": { "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'" }
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'"
+    }
   },
-  "bundle": { "active": false, "icon": ["icons/icon.png"] }
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis",
+      "msi",
+      "deb"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "publisher": "libremodele",
+    "category": "Utility",
+    "shortDescription": "Convert VRChat avatars into Sven Co-op playermodels",
+    "longDescription": "Converts VRChat avatars (VRM, FBX with Unity packages) into Sven Co-op GoldSrc playermodels, with a live 3D preview.",
+    "license": "MIT",
+    "linux": {
+      "deb": {
+        "section": "games"
+      }
+    }
+  }
 }

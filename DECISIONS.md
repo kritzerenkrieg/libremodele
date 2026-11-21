@@ -23,6 +23,8 @@ A phase starts only when its rows are Decided.
 | E | Phase E: Source back end (MDL v44+ server playermodel) |
 | F | Phase F: Batch runs and review report |
 | G | Phase G: FBX + Unity package input (B9) |
+| H | Phase H: Desktop GUI (A7) |
+| I | Phase I: Release builds |
 
 ## A: Project-wide
 
@@ -155,3 +157,12 @@ Evidence (2026-11-15, read-only inspection of `samples/neru` and `samples/gothic
 | H4 | Preview | Decided | **(b) Interactive 3D viewer** (user, 2026-11-20): turntable and a sequence picker; the report text alongside. Raised 2026-11-20. Options: (a) **the existing preview sheet PNG** (rest views + key sequences, A14) plus the report text; (b) an interactive 3D viewer (turntable, pick a sequence): a much larger job (an MDL → WebGL path in the front end). |
 | H5 | Install and licence | Decided | **(a) Warn and require a tick-box** (user, 2026-11-20) before installing a model whose licence doesn't clearly allow redistribution. Raised 2026-11-20. One-click install copies the model into the detected Sven Co-op addon folder (G22's Steam search). When the licence doesn't clearly allow redistribution (A13), the UI must say the model stays local (A6) before installing. Options: (a) **warn and require a tick-box to install**; (b) warn only; (c) block install. |
 | H6 | Crate layout | Decided | **Accepted** (user, 2026-11-20): Cargo workspace; library + CLI crate unchanged in role; `gui/` holds the Svelte front end and the Tauri `src-tauri` crate, which calls the library directly. Dependencies approved the same day: Rust `tauri` 2, `tauri-build`, `tauri-plugin-dialog`, `serde` (derive); npm in `gui/` only: `svelte`, `vite`, `@sveltejs/vite-plugin-svelte`, `typescript`, `@tauri-apps/api`, `@tauri-apps/plugin-dialog`, `@tauri-apps/cli` (dev), `three`. Anything more is asked again. Raised 2026-11-20. Proposal: a Cargo workspace: the current crate stays the library + CLI; a new `gui/` (Tauri `src-tauri`) crate depends on it and calls `source`, `donor`, `convert`, `mdl::write` and `preview` directly (no shelling out to the CLI). Conversions run on a worker thread so the window stays responsive. |
+
+## I: Release builds
+
+| Code | Topic | Status | Decision / Question |
+|---|---|---|---|
+| I1 | When builds run | Decided | **A version tag (`v*`) or a manual run** (user, 2026-11-21), on GitHub Actions' Windows and Ubuntu runners (A8: nothing heavy on the laptop). Pushes and PRs don't build installers. The tag must match the app's version. |
+| I2 | What a build produces | Decided | **App installers plus the CLI** (user, 2026-11-21): Windows NSIS `.exe` and `.msi`, and the CLI `libremodele.exe` in a zip; Debian `.deb` of the app, and the CLI in a `.tar.gz`. The `.deb` is built on Ubuntu 22.04 so it needs only WebKitGTK 4.1 (Debian 12 and later). |
+| I3 | Where tagged builds go | Decided | **A published GitHub Release** (user, 2026-11-21), with generated notes; a manual run keeps its files as workflow artifacts only. |
+| I4 | Checks before building | Decided | **Builds are gated on the checks** (user, 2026-11-21): fmt, clippy (warnings are errors), all tests, and `svelte-check`. Sample-based tests skip on CI (A6); the built-in donor tests run. |

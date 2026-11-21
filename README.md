@@ -35,6 +35,19 @@ the model's Sven animations.
 - **Checks:** every written model is re-read and must match exactly. Each conversion also
   writes a preview sheet and a report of every automatic choice.
 
+## Download
+
+Each [release](https://github.com/kritzerenkrieg/libremodele/releases) has:
+
+- Windows: `libremodele_<version>_x64-setup.exe` (or the `.msi`) for the desktop app, and
+  `libremodele-cli-<version>-windows-x64.zip` for the command line;
+- Debian and Ubuntu: `libremodele_<version>_amd64.deb` for the desktop app (Debian 12,
+  Ubuntu 22.04 or newer), and `libremodele-cli-<version>-linux-x64.tar.gz` for the command
+  line.
+
+Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed. The
+builds aren't code-signed, so Windows SmartScreen may ask you to confirm.
+
 ## Desktop app
 
 ```
@@ -104,6 +117,11 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 cd gui && npm run check       # type-checks the Svelte front end (svelte-check)
 ```
+
+To release, set the same version in `Cargo.toml`, `gui/src-tauri/Cargo.toml`,
+`gui/src-tauri/tauri.conf.json` and `gui/package.json`, then push a tag such as `v0.1.1`.
+The workflow runs the checks, builds on Windows and Ubuntu, and publishes the release.
+A manual run (Actions → release → Run workflow) builds without publishing.
 
 The project follows [DLAD](https://github.com/kritzerenkrieg/dlad):
 
