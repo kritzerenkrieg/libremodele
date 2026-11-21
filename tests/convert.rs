@@ -701,3 +701,26 @@ fn a_named_package_that_is_missing_is_an_error() {
     let e = source::choose(&files, &o).err().expect("an error");
     assert!(format!("{e:#}").contains("no Unity package"), "{e:#}");
 }
+
+#[test]
+fn licence_ignores_other_packages() {
+    // G15: a shader package's permissive LICENSE doesn't speak for the avatar.
+    let entries: Vec<(String, &[u8])> = vec![
+        (
+            "shader.unitypackage:Assets/Shader/LICENSE.txt".into(),
+            b"MIT License",
+        ),
+        (
+            "avatar.unitypackage:Assets/Avatar/readme.txt".into(),
+            b"No redistribution.",
+        ),
+    ];
+    let (best, _) = source::find_licence(&entries, "avatar.unitypackage:Assets/Avatar/a.fbx");
+    let (path, text) = best.expect("the avatar's own readme");
+    assert!(path.starts_with("avatar.unitypackage:"), "{path}");
+    assert_eq!(text, "No redistribution.");
+    // Loose files still count for a packaged avatar (Blondy's LICENSE.txt).
+    let entries: Vec<(String, &[u8])> = vec![("LICENSE.txt".into(), b"terms")];
+    let (best, _) = source::find_licence(&entries, "avatar.unitypackage:Assets/a.fbx");
+    assert_eq!(best.unwrap().0, "LICENSE.txt");
+}

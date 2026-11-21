@@ -268,7 +268,9 @@ fn shared(a: &str, b: &str) -> usize {
 /// they are only named.
 ///
 /// `entries` are the download's files plus the text files inside its Unity
-/// packages (`<package>:<asset path>`).
+/// packages (`<package>:<asset path>`). Text inside a package other than the
+/// avatar's belongs to another asset (a shader, a tool) and never counts;
+/// loose files and the avatar's own package do (G15, user 2026-11-21).
 pub fn find_licence(
     entries: &[(String, &[u8])],
     near: &str,
@@ -290,6 +292,7 @@ pub fn find_licence(
     };
     let best = entries
         .iter()
+        .filter(|(p, _)| container(p).is_none() || container(p) == container(near))
         .filter_map(|(p, d)| rank(p).map(|r| (r, p, d)))
         // The file's name first (licence or terms beat a readme, G15), then
         // the same container (the same Unity package, or both loose), then
@@ -309,6 +312,7 @@ pub fn find_licence(
     let pdfs: Vec<String> = entries
         .iter()
         .map(|(p, _)| p)
+        .filter(|p| container(p).is_none() || container(p) == container(near))
         .filter(|p| p.to_lowercase().ends_with(".pdf"))
         .cloned()
         .collect();

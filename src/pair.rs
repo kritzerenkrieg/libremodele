@@ -143,7 +143,10 @@ fn uv_cells(part: &Part) -> Option<Vec<bool>> {
         let span = 2 * GRID as i64;
         let (cx0, cy0) = (x0.floor() as i64, y0.floor() as i64);
         let (cx1, cy1) = (x1.floor() as i64, y1.floor() as i64);
-        if !(cx1 - cx0 <= span && cy1 - cy0 <= span) {
+        // Extreme coordinates saturate the casts; checked subtraction keeps
+        // them from wrapping into a "small" span.
+        let fits = |a: i64, b: i64| b.checked_sub(a).is_some_and(|d| d <= span);
+        if !(fits(cx0, cx1) && fits(cy0, cy1)) {
             return None;
         }
         for cy in cy0..=cy1 {
@@ -574,5 +577,7 @@ mod tests {
         assert!(uv_cells(&tri([[0.0, 0.0], [0.5, 0.0], [0.0, 0.5]])).is_some());
         // Four repeats wide and thin: the rows past the cap would be lost.
         assert!(uv_cells(&tri([[0.0, 0.0], [4.0, 0.0], [4.0, 1.0 / 16.0]])).is_none());
+        // Coordinates that saturate i64 don't wrap into an accepted span.
+        assert!(uv_cells(&tri([[0.0, 0.0], [-1e30, 0.0], [1e30, 1.0]])).is_none());
     }
 }
