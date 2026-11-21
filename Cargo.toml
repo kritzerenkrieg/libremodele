@@ -21,3 +21,7 @@ serde_json = "1.0.154"
 # takes minutes.
 [profile.test]
 opt-level = 2
+
+# The GUI's dev builds (`npm run tauri dev`) still convert at full speed.
+[profile.dev.package.libremodele]
+opt-level = 3

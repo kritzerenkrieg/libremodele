@@ -1,19 +1,24 @@
 # libremodele
 
-> **Status:** Phases D (GoldSrc back end) and G (FBX + Unity package input) are built and match this file, including the C/D revisions made while hardening on Miku and Neru (C4, C5, C8, C9, D2, D17) and the procedural input of A15 (G11–G27): `convert` takes a download as it came and chooses everything itself. The Source back end (§C "planned", Phase E) is designed in E1–E4 but not built yet.
+> **Status:** Phases D (GoldSrc back end) and G (FBX + Unity package input) are built and match this file, including the C/D revisions made while hardening on Miku and Neru (C4, C5, C8, C9, D2, D17) and the procedural input of A15 (G11–G27): `convert` takes a download as it came and chooses everything itself. Phase H (desktop GUI, H1–H6) is built: a Tauri 2 + Svelte window over the same library pipeline, with a live 3D viewer and one-click install. The Source back end (§C "planned", Phase E) is designed in E1–E4 but not built yet.
 
 How the system is built. `DECISIONS.md` overrules this file wherever they disagree.
 
 ```mermaid
 flowchart LR
     User["User<br/>a download: zip, rar, folder,<br/>.vrm or .fbx"] --> Cli["libremodele CLI<br/>(Rust, one binary)"]
-    Cli --> Choose["Input choice (A15)<br/>avatar file, package, licence,<br/>outfit check, donor"]
+    User --> Gui["libremodele GUI (H1)<br/>Tauri 2 + Svelte window"]
+    Cli --> Pipe["pipeline (H6)<br/>inspect → build → save → install"]
+    Gui --> Pipe
+    Pipe --> Choose["Input choice (A15)<br/>avatar file, package, licence,<br/>outfit check, donor"]
     Choose --> Front["Front end, in memory<br/>VRM or FBX/Unity load → Avatar,<br/>texture pairing, clean, lossless reduce,<br/>decimate, texture"]
     Steam[("Sven Co-op install<br/>stock gina.mdl")] -.-> Choose
     Front --> Gold["GoldSrc back end<br/>retarget to donor Bip01, bone budget,<br/>rigid bind, strips, optional sway, MDL v10 writer"]
     Front -.-> Src["Source back end (Phase E, planned)<br/>ValveBiped, 3 weights, VTF/VMT, MDL/VVD/VTX"]
     Gold --> OutGold[("out/goldsrc/models/player/name/")]
     Gold --> Review[("out/review/name/<br/>preview.png, report.txt,<br/>clean_manifest.json")]
+    Gold --> Viewer["3D viewer (H4)<br/>three.js, game-accurate posing,<br/>Sven sequences, weapons, hitboxes"]
+    OutGold -. "install (H2, H5)" .-> Addon[("svencoop_addon/models/player/")]
     Src -.-> OutSrc[("out/source/ GMod addon")]
 ```
 
@@ -65,10 +70,13 @@ Convert a VRChat avatar (the user's own or licensed, A6) into a game-ready **ser
 
 | Component | File | Responsibility | Decisions |
 |---|---|---|---|
+| Pipeline | `src/pipeline.rs` | The conversion as library calls shared by CLI and GUI: `inspect` (open, choose, name, donor), `build` (convert, sway, write, re-read), `save` (game and review trees), `install` (copy into the addon folder) | H6, A14, A15 |
+| GUI backend | `gui/src-tauri/src/` | `session.rs`: one avatar at a time, cached inspection, H5 licence gate on install; `view.rs`: viewer data (geometry in bone space, RGBA textures, per-frame bone locals, Sven `p_*.mdl` list); `lib.rs`: Tauri commands, slow steps on a worker thread, `progress` events | H2–H6 |
+| GUI front end | `gui/src/` | Svelte 5 + TypeScript: drop or pick a download, choices panel, main controls + Advanced (H3), progress, report, install with licence tick-box (H5); `Viewer.svelte` + `rig.ts`: three.js skinned meshes with one bone per vertex, gait/upper-body split at `Bip01 Spine`, blends, weapon bone-merge, bones and hitboxes | H2–H5 |
 | CLI | `src/main.rs` | `convert <download>` with optional overrides, `preview`, `mdl-info`, `mdl-roundtrip`; writes the output and review trees; re-reads the written MDL and fails if it differs | A7, A14, A15, D9, D16 |
 | Input choice | `src/source.rs` | Opens a zip (own reader), rar (`rars`), folder or single file's folder into `Files`; ranks avatar candidates (VRM first; stencil/outline, alt and Quest/Android penalties; the package's own FBX; triangle count), including `.vrm`/`.fbx` inside packages; picks the package and licence text; refuses unsupported archives; default model name from the download | A15, G15, G16, G21 |
 | Texture pairing | `src/pair.rs` | For an FBX material with no texture: scores candidate images by colour continuity across the part's UV seams, UV precision on opaque texels and file-name similarity, with margins; an authored FBX colour stays flat | G14, G19 |
-| Donor choice | `src/donor.rs` | Real-scale height under 1.4 m → chibi donor (`samples/yuki_ref`), else Sven's stock `gina` from the Steam install; clear error if the needed one is missing | G22 |
+| Donor choice | `src/donor.rs` | Real-scale height under 1.4 m → chibi donor (`samples/yuki_ref`), else Sven's stock `gina` from the Steam install; clear error if the needed one is missing; the Sven install and its addon player folder for the GUI | G22, H5 |
 | VRM reader | `src/vrm.rs` | glb + VRM 0.x JSON: node tree, humanoid map, licence, skinned bind-pose parts with dominant bone and skin weights per vertex, alpha mode (masked), first-person annotations, spring groups and colliders. Defines `Avatar`, the common input both readers produce | A5, B1, C5, D3, D15 |
 | FBX reader | `src/fbx.rs` | Own binary FBX 7.x parser (zlib arrays); Model tree with the full FBX local transform; bind pose from cluster `TransformLink` and BindPose, meshes placed by `TransformLink · Transform`; axes and units from GlobalSettings to Y-up metres; ear-clipped n-gons; parts per (mesh, material slot), slots numbered by first use as Unity does; UVs flipped to top-left; flat-colour parts packed into one swatch texture; humanoid from Unity's map, else by bone name, with skeleton nodes preferred over same-named meshes; PhysBones → spring groups | B9, G1–G3, G5, G6, G10, G18 |
 | Unity package reader | `src/unitypkg.rs` | `.unitypackage` tar.gz → assets by GUID and path; Unity YAML documents; prefab or scene variant; `.mat` colour, `_MainTex` and cutout per renderer slot; the FBX `.meta` material remap (`externalObjects`); prefab-instance material overrides; Unity humanoid map from the FBX `.meta`; VRCPhysBone and collider settings. Objects inside prefab instances are found by Unity's hashed fileID (`xxh64` of the object path); the package FBX is matched to a loose FBX by bone overlap | G2, G4, G5, G10, G11, G18, G20 |
@@ -79,7 +87,7 @@ Convert a VRChat avatar (the user's own or licensed, A6) into a game-ready **ser
 | Textures | `src/texture.rs` | Lanczos downscale (sides a multiple of 8), median-cut to 256 colours (255 + transparent index for masked), 8-bit BMP | C6, D6, D8 |
 | Sway | `src/sway.rs` | UniVRM spring port simulated offline per sequence; channels added root-first within each sequence's 64 KB budget | D13, D15, D16 |
 | MDL | `src/mdl/` | GoldSrc MDL v10 in memory: reader, writer (studiomdl section order, textures last), RLE animation codec | A9 |
-| Preview | `src/preview.rs` | Software rasteriser: bone poses, masked texels, contact sheet (rest views + key sequences), winding check | A14 |
+| Preview | `src/preview.rs` | Software rasteriser: bone poses (locals per sequence, blend and frame; shared with the viewer), masked texels, contact sheet (rest views + key sequences), winding check | A14 |
 | Math | `src/math.rs` | Vectors, 3×3 rotations, rigid transforms, GoldSrc Euler angles | — |
 | Source back end | (planned) | ValveBiped mapping, 3 smooth weights, DXT VTF/VMT, MDL/VVD/VTX writer, GMod addon with `$includemodel` animations | E1–E4 |
 
@@ -136,15 +144,17 @@ Nothing is cached between runs (B2 superseded: stages run in memory). Avatar sou
 | Interface | Kind | Spec location |
 |---|---|---|
 | CLI | CLI | `USAGE` in `src/main.rs`; commands in `AGENTS.md` |
+| GUI commands | Tauri IPC | `version`, `inspect(form)`, `convert(form)` + `progress` events, `install(keepLocal)`, `model_view(weapon)`, `texture` and `bone_frames` (binary), `weapons`, `load_weapon`; types in `gui/src/api.ts` |
 | `clean_manifest.json` | file | Array of `{part, keep, rule, ...}`; only `part` and `keep` are read back (B4) |
-| Library API | Rust | `source::{Files::open, choose, default_name}`, `donor::choose`, `pair::choose`, `vrm::load`, `fbx::load(&[u8], &fbx::Load)`, `unitypkg::{Package::read, settings}`, `mdl::{read, write}`, `convert::convert(&Avatar, &Model, &Options) -> Converted {model, manifest, report, rig}`, `decimate::decimate`, `sway::apply`, `preview::sheet` |
+| Library API | Rust | `pipeline::{inspect, build, save, install}`, `source::{Files::open, choose, default_name}`, `donor::choose`, `pair::choose`, `vrm::load`, `fbx::load(&[u8], &fbx::Load)`, `unitypkg::{Package::read, settings}`, `mdl::{read, write}`, `convert::convert(&Avatar, &Model, &Options) -> Converted {model, manifest, report, rig}`, `decimate::decimate`, `sway::apply`, `preview::sheet` |
 | Bone map | code | `HUMANOID` and `CHAINS` tables in `src/convert.rs` (D1, D2); bone-name aliases in `fbx::map_by_name` (G1) |
 
 ## G. Stack
 
 | Need | Choice | Decision |
 |---|---|---|
-| Language / app | Rust 2024, CLI first, Tauri GUI later | A7 |
+| Language / app | Rust 2024; CLI and a Tauri 2 desktop GUI over one library (Cargo workspace) | A7, H1, H6 |
+| GUI | Tauri 2 (`tauri`, `tauri-build`, `tauri-plugin-dialog`, `serde`); Svelte 5, Vite, TypeScript; `three` for the viewer | H1, H4, H6 |
 | Dependencies | `anyhow`, `serde_json`, `image` (PNG only), `flate2` (pure-Rust inflate for FBX arrays, zips and `.unitypackage`), `rars` 0.12.4 without default features (RAR) | A7, B9, G21 |
 | Archives | Own zip reader (stored, deflate); `rars` for RAR; 7z refused | G16, G21 |
 | VRM / glTF reading | Own reader | A1, B1 |
@@ -195,6 +205,7 @@ Nothing is cached between runs (B2 superseded: stages run in memory). Avatar sou
 libremodele/
   src/
     main.rs        CLI
+    pipeline.rs    inspect → build → save → install, shared by CLI and GUI (H6)
     lib.rs         module list
     source.rs      download → Files; avatar, package and licence choice (A15)
     pair.rs        texture pairing by seams (G14, G19)
@@ -211,6 +222,9 @@ libremodele/
     preview.rs     software preview
     math.rs        vectors and transforms
     mdl/           MDL v10 model, reader, writer, animation codec
+  gui/             desktop GUI (H1, H6)
+    src/           Svelte front end: App.svelte, Viewer.svelte, rig.ts, api.ts
+    src-tauri/     Tauri crate: lib.rs (commands), session.rs, view.rs
   tests/           roundtrip.rs (yuki_ref); convert.rs (Lucian, Miku, Neru, Poka, Gothic refused, download choice,
                    archives, names); skip without samples
   examples/        dev aids: bones, sway_budget, sway_debug, frames, avatar_info, parents, tilt,

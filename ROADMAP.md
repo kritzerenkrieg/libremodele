@@ -130,11 +130,11 @@ Starts once H1–H6 are Decided (A7). Tasks are written when they are.
 - [x] Decide H1–H6 (2026-11-20).
 - [x] Pipeline in the library: move the convert steps (open, choose, donor, convert, sway, write, re-read, preview) from `main.rs` into `src/pipeline.rs`, used by the CLI and the GUI (H6). Done when: CLI output is byte-identical for neru and all tests pass. Passed 2026-11-20: neru and lilyanne_sway `.mdl`/`.bmp` identical
 - [x] Workspace + Tauri 2/Svelte scaffold in `gui/` (H1, H6). Done when: `cargo build -p libremodele-gui` and the front-end build pass. Passed 2026-11-21
-- [ ] Backend commands: inspect a download (choices, licence, donor, warnings), convert on a worker thread with progress events, install (H2, H3, H5). Done when: a Rust test drives inspect → convert → install into a temp addon folder
-- [ ] Svelte UI: drop/pick, choices panel, main controls + Advanced, convert with progress, report (H2, H3). Done when: the user converts and installs an avatar from the window
-- [ ] 3D viewer: meshes and textures from the converted model, bone transforms per frame, turntable and sequence picker (H4). Done when: the user sees idle and a weapon sequence play in the window
-- [ ] Licence warning with a tick-box before install (H5, A6, A13). Done when: install is disabled until ticked for a non-redistributable licence
-- [ ] Update `ARCHITECTURE.md` (H codes). Done when: sections B to J match the code
+- [x] Backend commands: inspect a download (choices, licence, donor, warnings), convert on a worker thread with progress events, install (H2, H3, H5). Done when: a Rust test drives inspect → convert → install into a temp addon folder. Passed 2026-11-21 (`inspect_convert_install`)
+- [x] Svelte UI: drop/pick, choices panel, main controls + Advanced, convert with progress, report (H2, H3). Done when: the user converts and installs an avatar from the window. Passed 2026-11-21: user converted, installed and called it ready for release
+- [x] 3D viewer: meshes and textures from the converted model, bone transforms per frame, turntable and sequence picker (H4). Done when: the user sees idle and a weapon sequence play in the window. Passed 2026-11-21 (user)
+- [x] Licence warning with a tick-box before install (H5, A6, A13). Done when: install is disabled until ticked for a non-redistributable licence. Passed 2026-11-21: `install` refuses without the tick (`inspect_convert_install`); button disabled in the UI
+- [x] Update `ARCHITECTURE.md` (H codes). Done when: sections B to J match the code. Passed 2026-11-21
 
 ## Cycle: feature and maintenance
 

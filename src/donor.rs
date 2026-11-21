@@ -59,28 +59,45 @@ fn steam_libraries() -> Vec<PathBuf> {
     libs
 }
 
-/// The stock donor in the first Steam library that has Sven Co-op.
-pub fn stock() -> Option<PathBuf> {
+/// The first Sven Co-op install found in the Steam libraries.
+pub fn sven_root() -> Option<PathBuf> {
     steam_libraries()
         .into_iter()
-        .map(|l| l.join("steamapps/common/Sven Co-op").join(STOCK_DONOR))
-        .find(|p| p.is_file())
+        .map(|l| l.join("steamapps/common/Sven Co-op"))
+        .find(|p| p.join(STOCK_DONOR).is_file())
+}
+
+/// The stock donor in the first Steam library that has Sven Co-op.
+pub fn stock() -> Option<PathBuf> {
+    sven_root().map(|r| r.join(STOCK_DONOR))
+}
+
+/// Sven Co-op's addon player-model folder, where installed models go (H5).
+pub fn addon_players() -> Option<PathBuf> {
+    sven_root().map(|r| r.join("svencoop_addon/models/player"))
+}
+
+/// The chibi donor: relative to the working directory, else to this
+/// crate's folder (the GUI runs from `gui/src-tauri`).
+fn chibi_donor() -> Option<PathBuf> {
+    [
+        PathBuf::from(CHIBI_DONOR),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(CHIBI_DONOR),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
 }
 
 /// The donor path for `av`, and why (G22).
 pub fn choose(av: &Avatar) -> Result<(PathBuf, String)> {
     let h = height(av);
     if h < CHIBI_HEIGHT {
-        let p = Path::new(CHIBI_DONOR);
-        if !p.is_file() {
+        let Some(p) = chibi_donor() else {
             bail!(
                 "the avatar is {h:.2} m tall, so chibi (under {CHIBI_HEIGHT} m), but the chibi donor {CHIBI_DONOR} is missing; give --donor <donor.mdl> (G22)"
             );
-        }
-        Ok((
-            p.into(),
-            format!("chibi: {h:.2} m is under {CHIBI_HEIGHT} m"),
-        ))
+        };
+        Ok((p, format!("chibi: {h:.2} m is under {CHIBI_HEIGHT} m")))
     } else {
         match stock() {
             Some(p) => Ok((

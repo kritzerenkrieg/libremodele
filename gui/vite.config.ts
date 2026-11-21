@@ -6,5 +6,6 @@ export default defineConfig({
   plugins: [svelte()],
   clearScreen: false,
   server: { port: 5173, strictPort: true },
-  build: { target: "es2022", outDir: "dist", emptyOutDir: true },
+  // A desktop app bundling three.js; no download-size concern.
+  build: { target: "es2022", outDir: "dist", emptyOutDir: true, chunkSizeWarningLimit: 1500 },
 });

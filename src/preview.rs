@@ -9,26 +9,42 @@ use crate::mdl::Model;
 
 /// World transform of every bone at rest (`None`) or at (sequence, frame) of blend 0.
 pub fn bone_worlds(m: &Model, pose: Option<(usize, usize)>) -> Vec<Xf> {
-    let mut out: Vec<Xf> = Vec::with_capacity(m.bones.len());
-    for (i, b) in m.bones.iter().enumerate() {
-        let mut v = b.value;
-        if let Some((s, f)) = pose
-            && let Some(anim) = m
-                .sequences
-                .get(s)
-                .and_then(|s| s.blends.first())
-                .and_then(|bl| bl.get(i))
-        {
-            for (c, ch) in anim.channels.iter().enumerate() {
-                if let Some(vals) = ch {
-                    v[c] += vals[f.min(vals.len() - 1)] as f32 * b.scale[c];
+    worlds(m, &bone_locals(m, pose.map(|(s, f)| (s, 0, f))))
+}
+
+/// Each bone's transform relative to its parent, at rest (`None`) or at
+/// (sequence, blend, frame); channels the sequence lacks stay at rest.
+pub fn bone_locals(m: &Model, pose: Option<(usize, usize, usize)>) -> Vec<Xf> {
+    m.bones
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let mut v = b.value;
+            if let Some((s, bl, f)) = pose
+                && let Some(anim) = m
+                    .sequences
+                    .get(s)
+                    .and_then(|s| s.blends.get(bl))
+                    .and_then(|bl| bl.get(i))
+            {
+                for (c, ch) in anim.channels.iter().enumerate() {
+                    if let Some(vals) = ch {
+                        v[c] += vals[f.min(vals.len() - 1)] as f32 * b.scale[c];
+                    }
                 }
             }
-        }
-        let local = Xf::from_gs(&v);
+            Xf::from_gs(&v)
+        })
+        .collect()
+}
+
+/// Chain local transforms into world transforms (parents come first).
+pub fn worlds(m: &Model, locals: &[Xf]) -> Vec<Xf> {
+    let mut out: Vec<Xf> = Vec::with_capacity(locals.len());
+    for (b, local) in m.bones.iter().zip(locals) {
         out.push(match usize::try_from(b.parent).ok() {
-            Some(p) => out[p].then(&local),
-            None => local,
+            Some(p) => out[p].then(local),
+            None => *local,
         });
     }
     out

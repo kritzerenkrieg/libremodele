@@ -116,12 +116,18 @@ fn chain_of(name: &str) -> Option<(&'static [&'static str], usize)> {
         .find_map(|c| c.iter().position(|n| *n == name).map(|i| (*c, i)))
 }
 
+/// Whether a licence text doesn't clearly allow redistribution (A13): empty,
+/// or it prohibits or disallows something.
+pub fn licence_restricted(licence: &str) -> bool {
+    let l = licence.to_lowercase();
+    l.is_empty() || l.contains("prohibit") || l.contains("disallow")
+}
+
 pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
     let mut report = vec![format!("avatar: {:?}, licence {:?}", av.title, av.licence)];
     report.extend(av.notes.iter().cloned());
     // A13: warn, don't block.
-    let licence = av.licence.to_lowercase();
-    if licence.contains("prohibit") || licence.contains("disallow") || licence.is_empty() {
+    if licence_restricted(&av.licence) {
         report.push(format!(
             "warning: licence {:?} does not clearly allow redistribution; a server playermodel is downloaded by every client, so keep this output local (A6, A13)",
             av.licence

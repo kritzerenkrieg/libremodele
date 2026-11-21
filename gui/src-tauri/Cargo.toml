@@ -13,8 +13,8 @@ crate-type = ["rlib"]
 [dependencies]
 libremodele = { path = "../.." }
 serde = { version = "1.0.229", features = ["derive"] }
-tauri = "2"
+tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 
 [build-dependencies]
-tauri-build = "2"
+tauri-build = { version = "2", features = [] }
