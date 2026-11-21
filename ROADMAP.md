@@ -149,6 +149,7 @@ Decided in I1–I4.
 Candidate future features (each one a Question row first): outfit toggles as bodygroups (B6), Source flex visemes (B7), Sven Co-op high-limit profile (A4), FastDLX upload integration (E4).
 
 **Maintenance turn** (per release)
+- [ ] Rust version pinned in `.github/workflows/release.yml` bumped to the current stable (I4). Done when: the release workflow's checks pass on it
 - [ ] Tool versions reviewed: Blender, AssetRipper, meshoptimizer, studiomdl (A7, B1, C1, A9). Done when: fixture runs end to end on the new versions
 - [ ] Docs match reality. Done when: no Decided row contradicts the code or `ARCHITECTURE.md`
 - [ ] Stale rows closed or reopened. Done when: no TBD or Inspect row older than one cycle

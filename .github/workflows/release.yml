@@ -16,6 +16,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Pinned so a new Rust release (and its new lints) can't break a release
+  # build; bump it in the maintenance turn (ROADMAP).
+  RUST_VERSION: 1.100.0
 
 jobs:
   checks:
@@ -47,7 +50,7 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev
 
       - name: Rust
-        run: rustup toolchain install stable --profile minimal -c clippy,rustfmt && rustup default stable
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal -c clippy,rustfmt && rustup default "$RUST_VERSION"
 
       - uses: actions/setup-node@v4
         with:
@@ -98,7 +101,7 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev
 
       - name: Rust
-        run: rustup toolchain install stable --profile minimal && rustup default stable
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal && rustup default "$RUST_VERSION"
 
       - uses: actions/setup-node@v4
         with:

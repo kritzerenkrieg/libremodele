@@ -50,16 +50,16 @@ pub fn goldsrc_texture_masked(png: &[u8], max: u32, masked: bool) -> Result<Inde
             let mut pre = img;
             for p in pre.pixels_mut() {
                 let a = p.0[3] as u32;
-                for c in 0..3 {
-                    p.0[c] = ((p.0[c] as u32 * a + 127) / 255) as u8;
+                for v in &mut p.0[..3] {
+                    *v = ((*v as u32 * a + 127) / 255) as u8;
                 }
             }
             let mut out = image::imageops::resize(&pre, nw, nh, FilterType::Lanczos3);
             for p in out.pixels_mut() {
                 let a = p.0[3] as u32;
-                for c in 0..3 {
-                    if let Some(v) = (p.0[c] as u32 * 255 + a / 2).checked_div(a) {
-                        p.0[c] = v.min(255) as u8;
+                for v in &mut p.0[..3] {
+                    if let Some(x) = (*v as u32 * 255 + a / 2).checked_div(a) {
+                        *v = x.min(255) as u8;
                     }
                 }
             }

@@ -255,7 +255,7 @@ fn sequence(d: &[u8], c: &mut Cur, num_bones: usize) -> Result<Sequence> {
             let at = base + (b * num_bones + bone) * 12;
             let mut a = Cur::new(d, at);
             let mut anim = BoneAnim::default();
-            for ch in 0..6 {
+            for (ch, slot) in anim.channels.iter_mut().enumerate() {
                 let off = a.u16()? as usize;
                 if off == 0 {
                     continue;
@@ -264,7 +264,7 @@ fn sequence(d: &[u8], c: &mut Cur, num_bones: usize) -> Result<Sequence> {
                     .with_context(|| format!("{label}: blend {b} bone {bone} channel {ch}"))?;
                 // An all-zero channel and an absent one play the same; keep one form.
                 if vals.iter().any(|&v| v != 0) {
-                    anim.channels[ch] = Some(vals);
+                    *slot = Some(vals);
                 }
             }
             per_bone.push(anim);
