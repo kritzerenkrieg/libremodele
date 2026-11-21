@@ -50,6 +50,8 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev
 
       - name: Rust
+        # bash on every runner: PowerShell wouldn't expand $RUST_VERSION.
+        shell: bash
         run: rustup toolchain install "$RUST_VERSION" --profile minimal -c clippy,rustfmt && rustup default "$RUST_VERSION"
 
       - uses: actions/setup-node@v4
@@ -101,6 +103,8 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev
 
       - name: Rust
+        # bash on every runner: PowerShell wouldn't expand $RUST_VERSION.
+        shell: bash
         run: rustup toolchain install "$RUST_VERSION" --profile minimal && rustup default "$RUST_VERSION"
 
       - uses: actions/setup-node@v4
