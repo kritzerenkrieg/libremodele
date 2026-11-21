@@ -17,6 +17,14 @@ pub struct Asset {
     pub meta: Option<Vec<u8>>,
 }
 
+/// More material slots than any renderer has; a larger prefab override
+/// index is malformed.
+const MAX_SLOTS: usize = 256;
+
+/// Largest expanded `.unitypackage` (the tar inside), as the download scan
+/// budget (G16).
+const MAX_TAR: u64 = 2 << 30;
+
 pub struct Package {
     /// Sorted by path.
     pub assets: Vec<Asset>,
@@ -24,10 +32,16 @@ pub struct Package {
 
 impl Package {
     pub fn read(gz: &[u8]) -> Result<Package> {
+        // Expand at most MAX_TAR bytes: a small package can't inflate into
+        // an unbounded buffer.
         let mut tar = Vec::new();
         flate2::read::GzDecoder::new(gz)
+            .take(MAX_TAR + 1)
             .read_to_end(&mut tar)
             .context("unitypackage is not gzip")?;
+        if tar.len() as u64 > MAX_TAR {
+            bail!("unitypackage expands past {} GB", MAX_TAR >> 30);
+        }
         let mut by_guid: HashMap<String, Asset> = HashMap::new();
         let mut o = 0;
         let mut long_name: Option<String> = None;
@@ -396,7 +410,8 @@ pub fn settings(
             // Only for the package's own FBX: through G11's bone match the
             // objects belong to another file (Blindy's would get the
             // Combined FBX's atlas).
-            (Some((_, name)), Some(m)) if by_name.is_some() => {
+            // A slot index past any real renderer would only grow the array.
+            (Some((_, name)), Some(m)) if by_name.is_some() && o.slot < MAX_SLOTS => {
                 let slots = s.renderer_materials.entry(name.clone()).or_default();
                 if slots.len() <= o.slot {
                     slots.resize(o.slot + 1, None);
@@ -686,6 +701,20 @@ struct MaterialOverride {
 }
 
 /// `m_Materials.Array.data[N]` modifications in prefab instances.
+/// A YAML flow map starting `first` on line `at`, joined with the lines it
+/// wraps onto until its closing brace (at most a few).
+fn flow(lines: &[&str], at: usize, first: &str) -> String {
+    let mut out = first.to_string();
+    for l in lines.iter().skip(at + 1).take(4) {
+        if out.contains('}') || !out.trim_start().starts_with('{') {
+            break;
+        }
+        out.push(' ');
+        out.push_str(l);
+    }
+    out
+}
+
 fn material_overrides(text: &str) -> Vec<MaterialOverride> {
     let lines: Vec<&str> = text.lines().map(str::trim).collect();
     let mut out = Vec::new();
@@ -693,6 +722,8 @@ fn material_overrides(text: &str) -> Vec<MaterialOverride> {
         let Some(t) = l.strip_prefix("- target: ") else {
             continue;
         };
+        // Unity wraps long flow maps (`{fileID: …, guid:` / `…, type: 3}`).
+        let t = flow(&lines, i, t);
         // Long `target` lines wrap, so look a few lines on.
         let next = &lines[i + 1..(i + 6).min(lines.len())];
         let Some(slot) = next
@@ -708,11 +739,15 @@ fn material_overrides(text: &str) -> Vec<MaterialOverride> {
         let Some(obj) = next
             .iter()
             .take_while(|n| !n.starts_with("- target:"))
-            .find_map(|n| n.strip_prefix("objectReference: "))
+            .enumerate()
+            .find_map(|(k, n)| {
+                n.strip_prefix("objectReference: ")
+                    .map(|o| flow(&lines, i + 1 + k, o))
+            })
         else {
             continue;
         };
-        if let (Some(target), Some(g), Some(m)) = (file_id(t), guid(t), guid(obj)) {
+        if let (Some(target), Some(g), Some(m)) = (file_id(&t), guid(&t), guid(&obj)) {
             out.push(MaterialOverride {
                 target,
                 guid: g.to_string(),
@@ -727,6 +762,16 @@ fn material_overrides(text: &str) -> Vec<MaterialOverride> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrapped_override_targets_are_read() {
+        let text = "    - target: {fileID: -7511558181221131132, guid: 0123456789abcdef0123456789abcdef,\n        type: 3}\n      propertyPath: m_Materials.Array.data[2]\n      value:\n      objectReference: {fileID: 2100000, guid: fedcba9876543210fedcba9876543210,\n        type: 2}\n";
+        let o = material_overrides(text);
+        assert_eq!(o.len(), 1);
+        assert_eq!(o[0].slot, 2);
+        assert_eq!(o[0].guid, "0123456789abcdef0123456789abcdef");
+        assert_eq!(o[0].material, "fedcba9876543210fedcba9876543210");
+    }
 
     #[test]
     fn fbx_file_ids_match_unity() {

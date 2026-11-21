@@ -102,7 +102,7 @@ pub fn inspect(req: &Request) -> Result<Inspected> {
 /// `progress` hears each stage as it starts.
 pub fn build(insp: &Inspected, req: &Request, progress: &mut dyn FnMut(&str)) -> Result<Built> {
     progress("reading the donor");
-    let donor = read_mdl(&insp.donor)?;
+    let donor = donor::read(&insp.donor)?;
     progress("converting");
     let mut c = convert::convert(
         &insp.chosen.avatar,

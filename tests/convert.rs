@@ -1,5 +1,5 @@
-//! Lucian (VRM) → GoldSrc with yuki_ref as the animation donor. Both samples
-//! are licensed local files (A6) kept out of git, so the test skips without them.
+//! Lucian (VRM) → GoldSrc with the built-in yuki donor. The avatar samples are
+//! licensed local files (A6) kept out of git, so those tests skip without them.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -10,17 +10,28 @@ fn sample(rel: &str) -> Option<Vec<u8>> {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("samples")
         .join(rel);
-    std::fs::read(&p)
-        .map_err(|_| eprintln!("skipped: no sample at {}", p.display()))
-        .ok()
+    match std::fs::read(&p) {
+        Ok(b) => Some(b),
+        // Only a missing sample skips; a present one that can't be read fails.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipped: no sample at {}", p.display());
+            None
+        }
+        Err(e) => panic!("reading {}: {e}", p.display()),
+    }
+}
+
+/// The chibi donor that ships with the app (A6, D7 amended 2026-11-21).
+fn yuki() -> Option<Vec<u8>> {
+    Some(
+        std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("donors/yuki_muumuyu.mdl"))
+            .expect("donors/yuki_muumuyu.mdl is in the repository"),
+    )
 }
 
 #[test]
 fn lucian_converts() {
-    let (Some(v), Some(d)) = (
-        sample("lucian/DrHeart_Lucian_SF/VRM_Lucian_SF.vrm"),
-        sample("yuki_ref/models/player/yuki_muumuyu/yuki_muumuyu.mdl"),
-    ) else {
+    let (Some(v), Some(d)) = (sample("lucian/DrHeart_Lucian_SF/VRM_Lucian_SF.vrm"), yuki()) else {
         return;
     };
     let av = vrm::load(&v).unwrap();
@@ -157,10 +168,7 @@ fn lucian_converts() {
 /// image with masks (C5, D6). Local fixture only (A6).
 #[test]
 fn miku_converts() {
-    let (Some(v), Some(d)) = (
-        sample("miku/HatsuneMikuNT.vrm"),
-        sample("yuki_ref/models/player/yuki_muumuyu/yuki_muumuyu.mdl"),
-    ) else {
+    let (Some(v), Some(d)) = (sample("miku/HatsuneMikuNT.vrm"), yuki()) else {
         return;
     };
     let av = vrm::load(&v).unwrap();
@@ -209,7 +217,7 @@ fn neru_converts() {
     let (Some(f), Some(pk), Some(d)) = (
         sample("neru/Zako Neru 2.0/FBX/zako.fbx"),
         sample("neru/Zako Neru 2.0/Unitypackage/Zako Neru.unitypackage"),
-        sample("yuki_ref/models/player/yuki_muumuyu/yuki_muumuyu.mdl"),
+        yuki(),
     ) else {
         return;
     };
@@ -365,11 +373,7 @@ fn gothic_reads() {
 /// variant on that FBX (G11); Blindy's materials come from `--material`
 /// (G12). Local fixtures (A6).
 fn poka(fbx_rel: &str, pkg_rel: &str, materials: &[(&str, &str)]) -> Option<convert::Converted> {
-    let (Some(f), Some(pk), Some(d)) = (
-        sample(fbx_rel),
-        sample(pkg_rel),
-        sample("yuki_ref/models/player/yuki_muumuyu/yuki_muumuyu.mdl"),
-    ) else {
+    let (Some(f), Some(pk), Some(d)) = (sample(fbx_rel), sample(pkg_rel), yuki()) else {
         return None;
     };
     let pkg = unitypkg::Package::read(&pk).unwrap();
@@ -497,10 +501,12 @@ fn downloads_choose() {
         ),
     ];
     for (dir, want, licence) in cases {
-        let Ok((files, None)) = source::Files::open(&root.join(dir)) else {
+        if !root.join(dir).exists() {
             eprintln!("skipped: no sample folder {dir}");
             continue;
-        };
+        }
+        let (files, file) = source::Files::open(&root.join(dir)).unwrap();
+        assert!(file.is_none(), "{dir} is a folder");
         let c = source::choose(&files, &source::Overrides::default()).unwrap();
         assert_eq!(c.path, want, "{dir}");
         assert!(
@@ -577,6 +583,11 @@ fn unzip_reads_stored_and_deflated() {
             data.to_vec()
         };
         let off = out.len() as u32;
+        let crc = {
+            let mut c = flate2::Crc::new();
+            c.update(data);
+            c.sum()
+        };
         let head = |sig: &[u8], central: bool| {
             let mut h = sig.to_vec();
             if central {
@@ -585,7 +596,8 @@ fn unzip_reads_stored_and_deflated() {
             h.extend(20u16.to_le_bytes());
             h.extend(0u16.to_le_bytes());
             h.extend(method.to_le_bytes());
-            h.extend([0u8; 8]); // time, date, crc
+            h.extend([0u8; 4]); // time, date
+            h.extend(crc.to_le_bytes());
             h.extend((body.len() as u32).to_le_bytes());
             h.extend((data.len() as u32).to_le_bytes());
             h.extend((name.len() as u16).to_le_bytes());
@@ -640,4 +652,35 @@ fn default_names_fit() {
     );
     assert_eq!(n("/x/Neru_2.0.zip", "q.fbx"), "neru_2_0");
     assert!(n("/x/A_Very_Long_Download_Name_Here.zip", "q").len() <= source::MAX_NAME);
+}
+
+#[test]
+fn broken_loose_copy_falls_back_to_package() {
+    // #17: a corrupt loose FBX doesn't hide the same file inside the package.
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("samples/neru");
+    if !root.exists() {
+        eprintln!("skipped: no sample folder neru");
+        return;
+    }
+    let (mut files, _) = source::Files::open(&root).unwrap();
+    let loose = files
+        .entries
+        .iter_mut()
+        .find(|(p, _)| p.ends_with("FBX/zako.fbx"))
+        .expect("Neru's loose FBX");
+    loose.1 = b"not an fbx".to_vec();
+    let c = source::choose(&files, &source::Overrides::default()).unwrap();
+    assert!(
+        c.path.ends_with(".unitypackage:Assets/FBX/zako.fbx"),
+        "{}",
+        c.path
+    );
+    assert!(
+        c.avatar
+            .notes
+            .iter()
+            .any(|n| n.contains("can't be read; trying the packaged copy")),
+        "{:?}",
+        c.avatar.notes
+    );
 }

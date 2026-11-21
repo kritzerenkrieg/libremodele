@@ -45,14 +45,27 @@
   let sequences = $derived(rig?.view.sequences ?? []);
   let current = $derived(sequences[seq]);
 
+  // Each loader has a token: a result that comes back after a newer call
+  // started is dropped (and anything it built is disposed).
+  const tokens = { model: 0, sequence: 0, gait: 0, weapon: 0 };
+
   async function loadModel() {
+    const t = ++tokens.model;
     loading = true;
     error = "";
     try {
       dropWeapon();
       rig?.dispose();
+      rig = null;
+      upper = null;
+      legs = null;
       skeletonHelper?.removeFromParent();
-      rig = await build(root, false);
+      const built = await build(root, false);
+      if (t !== tokens.model) {
+        built.dispose();
+        return;
+      }
+      rig = built;
       skeletonHelper = new THREE.SkeletonHelper(root);
       scene.add(skeletonHelper);
       const idle = rig.view.sequences.findIndex((s) => s.label === "idle");
@@ -61,17 +74,20 @@
       await loadSequence();
       if (weapon) await setWeapon(weapon);
     } catch (e) {
-      error = String(e);
+      if (t === tokens.model) error = String(e);
     } finally {
-      loading = false;
+      if (t === tokens.model) loading = false;
     }
   }
 
   async function loadSequence() {
     if (!rig) return;
+    const t = ++tokens.sequence;
     const s = rig.view.sequences[seq];
     blend = Math.min(blend, s.blends - 1);
-    upper = await api.boneFrames(false, seq, blend);
+    const frames = await api.boneFrames(false, rig.view.generation, seq, blend);
+    if (t !== tokens.sequence) return;
+    upper = frames;
     clock = 0;
     await loadGait();
   }
@@ -81,8 +97,11 @@
       legs = null;
       return;
     }
+    const t = ++tokens.gait;
     const g = rig.view.sequences[gait];
-    legs = await api.boneFrames(false, gait, 0);
+    const frames = await api.boneFrames(false, rig.view.generation, gait, 0);
+    if (t !== tokens.gait) return;
+    legs = frames;
     legsFrames = g.frames;
     legsFps = Math.max(g.fps, 1);
     legsClock = 0;
@@ -94,25 +113,35 @@
   }
 
   async function setWeapon(file: string) {
+    const t = ++tokens.weapon;
     dropWeapon();
     if (!rig || !file) {
       await api.loadWeapon(null);
       return;
     }
+    const holder = rig;
     try {
       await api.loadWeapon(file);
-      gun = await build(root, true, rig);
+      if (t !== tokens.weapon || rig !== holder) return;
+      const built = await build(root, true, holder);
+      if (t !== tokens.weapon || rig !== holder) {
+        built.dispose();
+        return;
+      }
+      gun = built;
       gun.hitboxes.forEach((h) => (h.visible = false));
     } catch (e) {
-      error = String(e);
+      if (t === tokens.weapon) error = String(e);
     }
   }
 
   function pose() {
     if (!rig || !upper) return;
     const n = rig.bones.length;
-    const s = rig.view.sequences[seq];
-    const f = Math.min(frame, s.frames - 1);
+    // Frames actually loaded (the selection can run ahead of the data).
+    const loaded = Math.floor(upper.length / (n * 12));
+    if (loaded < 1) return;
+    const f = Math.min(frame, loaded - 1);
     for (let i = 0; i < n; i++) {
       // Sven's player renderer: bones before "Bip01 Spine" follow the gait.
       if (legs && i < rig.view.gaitSplit) {

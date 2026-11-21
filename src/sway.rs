@@ -202,7 +202,13 @@ struct State {
 fn simulate(m: &Model, rig: &Rig, si: usize, b: usize) -> Vec<Vec<V3>> {
     let seq = &m.sequences[si];
     let frames = seq.num_frames.max(1) as usize;
-    let fps = if seq.fps > 0.0 { seq.fps } else { 30.0 };
+    // A broken rate (zero, NaN, or tiny enough to make billions of
+    // substeps) falls back to 30 or is clamped to a sane range.
+    let fps = if seq.fps > 0.0 && seq.fps.is_finite() {
+        seq.fps.clamp(1.0, 1000.0)
+    } else {
+        30.0
+    };
     let looping = seq.flags & 1 != 0 && frames > 1;
     let substeps = (SIM_HZ / fps).ceil().max(1.0) as usize;
     let dt = 1.0 / (fps * substeps as f32);
@@ -252,6 +258,11 @@ fn simulate(m: &Model, rig: &Rig, si: usize, b: usize) -> Vec<Vec<V3>> {
         })
         .collect();
 
+    // Every bone below each chain bone: when the spring turns a bone, its
+    // subtree (colliders on it, and the parents of chains further down)
+    // turns with it within the same substep (#54).
+    let under: Vec<Vec<usize>> = states.iter().map(|st| descendants(m, st.bone)).collect();
+
     let mut out = vec![Vec::with_capacity(frames); states.len()];
     let step = |f: f32, record: bool, states: &mut Vec<State>, out: &mut Vec<Vec<V3>>| {
         let mut w = pose(m, si, b, f);
@@ -281,7 +292,7 @@ fn simulate(m: &Model, rig: &Rig, si: usize, b: usize) -> Vec<Vec<V3>> {
             st.cur = next;
             let rot =
                 M3::align(norm(rest_world.apply(st.axis)), norm(sub(next, pos))).mul(&rest_world);
-            w[st.bone] = Xf::new(rot, pos);
+            carry(&mut w, st.bone, Xf::new(rot, pos), &under[i]);
             if record {
                 let a = pw.r.transpose().mul(&rot).to_gs_angles();
                 let prev = out[i].last().copied().unwrap_or([0.0; 3]);
@@ -327,6 +338,30 @@ fn simulate(m: &Model, rig: &Rig, si: usize, b: usize) -> Vec<Vec<V3>> {
     out
 }
 
+/// Bones below `bone` (bones are stored parent-first), nearest first.
+fn descendants(m: &Model, bone: usize) -> Vec<usize> {
+    let mut inside = vec![false; m.bones.len()];
+    inside[bone] = true;
+    let mut out = Vec::new();
+    for (i, b) in m.bones.iter().enumerate().skip(bone + 1) {
+        if b.parent >= 0 && inside.get(b.parent as usize) == Some(&true) {
+            inside[i] = true;
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// Set `bone`'s world transform and move the bones `under` it rigidly with
+/// it, so their worlds stay consistent with the new pose.
+fn carry(w: &mut [Xf], bone: usize, new: Xf, under: &[usize]) {
+    let delta = new.then(&w[bone].inverse_rigid());
+    for &d in under {
+        w[d] = delta.then(&w[d]);
+    }
+    w[bone] = new;
+}
+
 /// The delta from `rest` of whichever Euler triple equal to `a` lies closest
 /// to `prev`. Near gimbal lock x and z swing far for a small turn; the engine
 /// slerps the quaternions it builds from them, so any equal triple plays the
@@ -354,6 +389,22 @@ fn wrap(a: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turning_a_bone_carries_its_subtree() {
+        // Bone 0 at the origin, a collider bone 1 one unit along x below it.
+        let mut w = vec![
+            Xf::new(M3::IDENTITY, [0.0; 3]),
+            Xf::new(M3::IDENTITY, [1.0, 0.0, 0.0]),
+        ];
+        // Turn bone 0 a quarter turn about z: x goes to y.
+        let quarter = M3::align([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        carry(&mut w, 0, Xf::new(quarter, [0.0; 3]), &[1]);
+        let p = w[1].apply([0.0; 3]);
+        assert!((p[0]).abs() < 1e-5 && (p[1] - 1.0).abs() < 1e-5, "{p:?}");
+        let x = w[1].r.apply([1.0, 0.0, 0.0]);
+        assert!((x[1] - 1.0).abs() < 1e-5, "{x:?}");
+    }
 
     #[test]
     fn nearest_keeps_the_rotation_and_stays_close() {

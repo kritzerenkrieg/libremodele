@@ -1,18 +1,32 @@
 //! Donor choice when `--donor` isn't given (G22): avatars are authored at
 //! real scale, so a short one is chibi and gets a chibi donor; others get
-//! Sven Co-op's stock `gina`, read from the local Steam install.
+//! Sven Co-op's stock `gina`, read from the local Steam install. The chibi
+//! donor ships inside the app (A6, D7 amended 2026-11-21).
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
+use crate::mdl::{self, Model};
 use crate::vrm::Avatar;
 
 /// Real-scale height (metres) below which an avatar is chibi (G22).
 pub const CHIBI_HEIGHT: f32 = 1.4;
 
-/// The chibi donor, relative to the working directory (A6: a local file).
-pub const CHIBI_DONOR: &str = "samples/yuki_ref/models/player/yuki_muumuyu/yuki_muumuyu.mdl";
+/// The built-in chibi donor's name: Yuki's `yuki_muumuyu` with TapChan's
+/// Sven Co-op animations, shipped with permission (A6, D7 amended 2026-11-21).
+pub const CHIBI_DONOR: &str = "<built-in>/yuki_muumuyu.mdl";
+
+static CHIBI_BYTES: &[u8] = include_bytes!("../donors/yuki_muumuyu.mdl");
+
+/// Read a donor: the built-in chibi donor by its name, else a file.
+pub fn read(path: &Path) -> Result<Model> {
+    if path == Path::new(CHIBI_DONOR) {
+        return mdl::read(CHIBI_BYTES).context("parsing the built-in chibi donor");
+    }
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    mdl::read(&bytes).with_context(|| format!("parsing {}", path.display()))
+}
 
 /// The stock donor inside a Sven Co-op install.
 const STOCK_DONOR: &str = "svencoop/models/player/gina/gina.mdl";
@@ -27,6 +41,22 @@ pub fn height(av: &Avatar) -> f32 {
     if hi > lo { hi - lo } else { 0.0 }
 }
 
+/// Steam's install folder from the registry (`HKCU\Software\Valve\Steam`,
+/// `SteamPath`), read with the system's `reg` tool.
+#[cfg(windows)]
+fn windows_steam_path() -> Option<PathBuf> {
+    let out = std::process::Command::new("reg")
+        .args(["query", r"HKCU\Software\Valve\Steam", "/v", "SteamPath"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("SteamPath"))?;
+    let value = line.split("REG_SZ").nth(1)?.trim();
+    (!value.is_empty()).then(|| PathBuf::from(value.replace('/', "\\")))
+}
+
 /// Steam library roots that may hold Sven Co-op.
 fn steam_libraries() -> Vec<PathBuf> {
     let mut roots = Vec::new();
@@ -39,6 +69,11 @@ fn steam_libraries() -> Vec<PathBuf> {
         ] {
             roots.push(home.join(r));
         }
+    }
+    // Windows: Steam records where it is installed (often not on C:).
+    #[cfg(windows)]
+    if let Some(p) = windows_steam_path() {
+        roots.push(p);
     }
     for r in [r"C:\Program Files (x86)\Steam", r"C:\Program Files\Steam"] {
         roots.push(PathBuf::from(r));
@@ -77,27 +112,14 @@ pub fn addon_players() -> Option<PathBuf> {
     sven_root().map(|r| r.join("svencoop_addon/models/player"))
 }
 
-/// The chibi donor: relative to the working directory, else to this
-/// crate's folder (the GUI runs from `gui/src-tauri`).
-fn chibi_donor() -> Option<PathBuf> {
-    [
-        PathBuf::from(CHIBI_DONOR),
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(CHIBI_DONOR),
-    ]
-    .into_iter()
-    .find(|p| p.is_file())
-}
-
 /// The donor path for `av`, and why (G22).
 pub fn choose(av: &Avatar) -> Result<(PathBuf, String)> {
     let h = height(av);
     if h < CHIBI_HEIGHT {
-        let Some(p) = chibi_donor() else {
-            bail!(
-                "the avatar is {h:.2} m tall, so chibi (under {CHIBI_HEIGHT} m), but the chibi donor {CHIBI_DONOR} is missing; give --donor <donor.mdl> (G22)"
-            );
-        };
-        Ok((p, format!("chibi: {h:.2} m is under {CHIBI_HEIGHT} m")))
+        Ok((
+            PathBuf::from(CHIBI_DONOR),
+            format!("chibi: {h:.2} m is under {CHIBI_HEIGHT} m"),
+        ))
     } else {
         match stock() {
             Some(p) => Ok((

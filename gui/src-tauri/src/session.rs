@@ -115,6 +115,10 @@ pub struct Session {
     done: Option<Done>,
     /// A Sven weapon model held in the viewer (H4).
     weapon: Option<mdl::Model>,
+    /// Bumped whenever the model (`[0]`) or the weapon (`[1]`) changes, so
+    /// the viewer can't mix one model's geometry with another's frames or
+    /// textures.
+    generation: [u64; 2],
 }
 
 fn text(e: impl std::fmt::Display) -> String {
@@ -176,12 +180,27 @@ impl Session {
             bytes: built.bytes.len(),
             restricted,
         };
+        self.generation[0] += 1;
         self.done = Some(Done {
             game,
             restricted,
             model: built.model,
         });
         Ok(o)
+    }
+
+    /// The current viewer generation of the model or the weapon (see
+    /// [`Self::model_at`]).
+    pub fn generation(&self, weapon: bool) -> u64 {
+        self.generation[weapon as usize]
+    }
+
+    /// As [`Self::model`], refused when the model changed since `generation`.
+    pub fn model_at(&self, weapon: bool, generation: u64) -> Result<&mdl::Model, String> {
+        if generation != self.generation[weapon as usize] {
+            return Err("the model changed; reloading".into());
+        }
+        self.model(weapon)
     }
 
     /// The converted model, or the loaded weapon, for the viewer (H4).
@@ -201,12 +220,25 @@ impl Session {
     /// Load one of Sven's `p_*.mdl` weapon models (or none) into the viewer.
     pub fn load_weapon(&mut self, file: Option<&str>) -> Result<(), String> {
         self.weapon = None;
+        self.generation[1] += 1;
         let Some(file) = file else { return Ok(()) };
         if file.contains(['/', '\\']) || !file.ends_with(".mdl") {
             return Err(format!("not a weapon model: {file}"));
         }
         let root = donor::sven_root().ok_or("Sven Co-op wasn't found")?;
         let m = pipeline::read_mdl(&root.join("svencoop/models").join(file)).map_err(text)?;
+        // The viewer chains bones parent-first; any other order is malformed.
+        if let Some((i, b)) = m
+            .bones
+            .iter()
+            .enumerate()
+            .find(|(i, b)| b.parent >= *i as i32)
+        {
+            return Err(format!(
+                "{file}: bone {i} ({}) has parent {}, not an earlier bone",
+                b.name, b.parent
+            ));
+        }
         self.weapon = Some(m);
         Ok(())
     }

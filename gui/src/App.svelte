@@ -58,6 +58,8 @@
   }
 
   function choose(path: string) {
+    // A drop while reading or converting would swap the form mid-run.
+    if (busy) return;
     // A new download starts clean: its own name, licence and overrides.
     form = { ...api.emptyForm(), input: path, sway: form.sway, keepPolygons: form.keepPolygons };
     materialsText = "";

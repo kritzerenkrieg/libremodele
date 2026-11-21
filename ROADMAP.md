@@ -97,7 +97,7 @@ flowchart LR
 ## Phase G: FBX + Unity package input
 
 **Goal:** Neru (and Gothic Doll's outfit, as a decimation stress case) convert from FBX plus their `.unitypackage` (B9).
-**Exit:** both convert and pass the same checks as `miku_converts`; the user confirms both in game.
+**Exit:** Neru converts and passes the same checks as `miku_converts`, and the user confirms it in game; Gothic Doll's outfit, which has no base avatar, is refused with a clear message (G17), which counts as passing.
 
 - [x] Own binary FBX reader: nodes, mesh, UVs, normals, materials, skin clusters, bind pose, axes and units (B9, G6). Done when: a test reads both samples with the expected mesh/bone/poly counts Passed 2026-11-15 (`neru_converts`, `gothic_reads`)
 - [x] Unitypackage reader: GUID → path, `.mat` colour/texture, prefab renderer materials, textures by name (B9, G2, G4). Done when: a test lists Gothic's materials per mesh Passed 2026-11-15 (`gothic_reads`)

@@ -9,6 +9,9 @@ use serde::Serialize;
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelView {
+    /// The session generation this view belongs to; pass it back with
+    /// every texture and frame request.
+    pub generation: u64,
     pub name: String,
     pub bones: Vec<BoneView>,
     pub textures: Vec<TextureView>,
@@ -67,7 +70,7 @@ pub struct HitboxView {
 }
 
 /// Everything but the texture pixels and animation frames.
-pub fn model_view(m: &Model) -> ModelView {
+pub fn model_view(m: &Model, generation: u64) -> ModelView {
     let rest = preview::bone_worlds(m, None);
     // Front faces as in game: wind every triangle counter-clockwise.
     let flip = preview::winding_sign(m) < 0.0;
@@ -130,6 +133,7 @@ pub fn model_view(m: &Model) -> ModelView {
         }
     }
     ModelView {
+        generation,
         name: m.name.clone(),
         bones: m
             .bones
@@ -239,14 +243,10 @@ mod tests {
     /// preview's rest pose.
     #[test]
     fn view_matches_preview() {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../samples/yuki_ref/models/player/yuki_muumuyu/yuki_muumuyu.mdl");
-        if !p.is_file() {
-            eprintln!("skipping: yuki_ref missing");
-            return;
-        }
+        let p =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../donors/yuki_muumuyu.mdl");
         let m = libremodele::pipeline::read_mdl(&p).unwrap();
-        let v = model_view(&m);
+        let v = model_view(&m, 0);
         let corners: usize = v.meshes.iter().map(|x| x.bones.len()).sum();
         assert_eq!(
             corners,

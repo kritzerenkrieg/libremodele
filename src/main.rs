@@ -50,25 +50,30 @@ fn load(path: &str) -> Result<mdl::Model> {
     pipeline::read_mdl(Path::new(path))
 }
 
-fn flag<'a>(rest: &[&'a str], name: &str) -> Option<&'a str> {
-    rest.iter()
-        .position(|a| *a == name)
-        .and_then(|i| rest.get(i + 1))
-        .copied()
+/// The value after `name`; an error when `name` is last or followed by
+/// another flag, so a forgotten value isn't silently the default.
+fn flag<'a>(rest: &[&'a str], name: &str) -> Result<Option<&'a str>> {
+    let Some(i) = rest.iter().position(|a| *a == name) else {
+        return Ok(None);
+    };
+    match rest.get(i + 1) {
+        Some(v) if !v.starts_with("--") => Ok(Some(v)),
+        _ => bail!("{name} needs a value"),
+    }
 }
 
 fn convert_cmd(input: &str, rest: &[&str]) -> Result<()> {
-    let height = flag(rest, "--height")
+    let height = flag(rest, "--height")?
         .map(str::parse::<f32>)
         .transpose()
         .context("--height must be a number")?;
-    let max_tris = flag(rest, "--max-tris")
+    let max_tris = flag(rest, "--max-tris")?
         .map(str::parse::<usize>)
         .transpose()
         .context("--max-tris must be a whole number")?;
-    let out = PathBuf::from(flag(rest, "--out").unwrap_or("out"));
+    let out = PathBuf::from(flag(rest, "--out")?.unwrap_or("out"));
     let mut keep = HashMap::new();
-    if let Some(m) = flag(rest, "--manifest") {
+    if let Some(m) = flag(rest, "--manifest")? {
         let v: serde_json::Value =
             serde_json::from_slice(&std::fs::read(m).with_context(|| format!("reading {m}"))?)?;
         for e in v.as_array().into_iter().flatten() {
@@ -83,24 +88,30 @@ fn convert_cmd(input: &str, rest: &[&str]) -> Result<()> {
     // A15, G16: everything is chosen from the input; flags only override.
     let req = pipeline::Request {
         input: PathBuf::from(input),
-        name: flag(rest, "--name").map(str::to_string),
-        donor: flag(rest, "--donor").map(PathBuf::from),
-        avatar: flag(rest, "--avatar").map(str::to_string),
-        package: flag(rest, "--package").map(str::to_string),
-        licence: flag(rest, "--licence").map(str::to_string),
-        variant: flag(rest, "--variant").map(str::to_string),
-        materials: rest
-            .iter()
-            .zip(rest.iter().skip(1))
-            .filter(|(a, _)| **a == "--material")
-            .map(|(_, v)| {
-                v.split_once('=')
-                    .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-                    .with_context(|| {
-                        format!("--material wants \"<FBX material>=<.mat or image>\", got {v:?}")
-                    })
-            })
-            .collect::<Result<_>>()?,
+        name: flag(rest, "--name")?.map(str::to_string),
+        donor: flag(rest, "--donor")?.map(PathBuf::from),
+        avatar: flag(rest, "--avatar")?.map(str::to_string),
+        package: flag(rest, "--package")?.map(str::to_string),
+        licence: flag(rest, "--licence")?.map(str::to_string),
+        variant: flag(rest, "--variant")?.map(str::to_string),
+        materials: {
+            if rest.last() == Some(&"--material") {
+                bail!("--material needs a value");
+            }
+            rest.iter()
+                .zip(rest.iter().skip(1))
+                .filter(|(a, _)| **a == "--material")
+                .map(|(_, v)| {
+                    v.split_once('=')
+                        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                        .with_context(|| {
+                            format!(
+                                "--material wants \"<FBX material>=<.mat or image>\", got {v:?}"
+                            )
+                        })
+                })
+                .collect::<Result<_>>()?
+        },
         height,
         max_tris,
         keep_polygons: rest.contains(&"--keep-polygons"),

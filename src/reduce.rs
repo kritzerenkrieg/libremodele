@@ -141,6 +141,13 @@ fn try_collapse(
         }
     }
 
+    // Normals are interpolated across a face: removing v keeps the shading
+    // only when v's normal equals its neighbours' (a planar fan can still
+    // carry a tilted normal at its centre).
+    if attr.values().any(|a| a.1 != attr[&v].1) {
+        return Err(Block::SeamOrCrease);
+    }
+
     // Closed fan: every ring edge (v, w) is shared by exactly two fan triangles,
     // once in each direction.
     let mut out_edges: HashMap<usize, usize> = HashMap::new();
@@ -265,7 +272,12 @@ fn apply(
     tris: &mut [Option<[(usize, Vtx); 3]>],
     incident: &mut [Vec<usize>],
 ) {
+    // Only the deleted triangles' corners have stale incidence entries.
+    let mut touched = Vec::new();
     for t in plan.delete {
+        if let Some(c) = tris[t] {
+            touched.extend(c.map(|(id, _)| id));
+        }
         tris[t] = None;
     }
     for (t, nc) in plan.rewrite {
@@ -273,8 +285,10 @@ fn apply(
         incident[u].push(t);
     }
     incident[v].clear();
-    for list in incident.iter_mut() {
-        list.retain(|&t| tris[t].is_some());
+    touched.sort_unstable();
+    touched.dedup();
+    for id in touched {
+        incident[id].retain(|&t| tris[t].is_some());
     }
 }
 

@@ -68,7 +68,7 @@ fn not_colour(name: &str) -> bool {
 impl Candidate {
     /// `None` when the bytes aren't a PNG or the name says it isn't colour.
     pub fn new(name: String, file: String, png: Vec<u8>, masked: Option<bool>) -> Option<Self> {
-        if !png.starts_with(b"\x89PNG") || not_colour(&file) {
+        if !crate::texture::is_image(&png) || not_colour(&file) {
             return None;
         }
         let img = image::load_from_memory(&png).ok()?.to_rgba8();
@@ -76,6 +76,15 @@ impl Candidate {
         if w < 16 || h < 16 {
             return None;
         }
+        // An image smaller than the grid is stretched to it (nearest), so
+        // every cell gets texels.
+        let img = if (w as usize) < GRID || (h as usize) < GRID {
+            let (gw, gh) = (w.max(GRID as u32), h.max(GRID as u32));
+            image::imageops::resize(&img, gw, gh, image::imageops::FilterType::Nearest)
+        } else {
+            img
+        };
+        let (w, h) = img.dimensions();
         let mut painted = vec![0u32; GRID * GRID];
         let mut clear = vec![0u32; GRID * GRID];
         let mut count = vec![0u32; GRID * GRID];
@@ -126,8 +135,16 @@ fn uv_cells(part: &Part) -> Vec<bool> {
         );
         let area =
             (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
-        for cy in y0.floor().max(-1e6) as i64..=y1.floor() as i64 {
-            for cx in x0.floor() as i64..=x1.floor() as i64 {
+        // A triangle spanning many texture repeats: cells wrap, so two
+        // repeats' worth of rows and columns already reach every cell it can.
+        let span = 2 * GRID as i64;
+        let (cx0, cy0) = (x0.floor() as i64, y0.floor() as i64);
+        let (cx1, cy1) = (
+            (x1.floor() as i64).min(cx0 + span),
+            (y1.floor() as i64).min(cy0 + span),
+        );
+        for cy in cy0..=cy1 {
+            for cx in cx0..=cx1 {
                 let (c, r) = (
                     cx.rem_euclid(GRID as i64) as usize,
                     cy.rem_euclid(GRID as i64) as usize,
@@ -231,8 +248,33 @@ fn stem(file: &str) -> &str {
 
 /// `context` is the avatar file's path (for the alternate check).
 pub fn fit(part: &Part, material: &str, context: &str, c: &Candidate) -> Option<Fit> {
-    let uv = uv_cells(part);
-    let n_uv = uv.iter().filter(|&&b| b).count();
+    fit_shape(&Shape::of(part), material, context, c)
+}
+
+/// What scoring needs from a part, independent of the candidate: built once
+/// per part, then reused for every candidate (#11).
+pub struct Shape<'p> {
+    part: &'p Part,
+    uv: Vec<bool>,
+    n_uv: usize,
+    seams: Vec<[[f32; 2]; 4]>,
+}
+
+impl<'p> Shape<'p> {
+    pub fn of(part: &'p Part) -> Self {
+        let uv = uv_cells(part);
+        let n_uv = uv.iter().filter(|&&b| b).count();
+        Shape {
+            part,
+            uv,
+            n_uv,
+            seams: seams(part),
+        }
+    }
+}
+
+fn fit_shape(sh: &Shape, material: &str, context: &str, c: &Candidate) -> Option<Fit> {
+    let (part, uv, n_uv) = (sh.part, &sh.uv, sh.n_uv);
     if n_uv == 0 {
         return None;
     }
@@ -248,7 +290,7 @@ pub fn fit(part: &Part, material: &str, context: &str, c: &Candidate) -> Option<
             0.0
         }),
         clear: clear as f32 / n_uv as f32,
-        seam: seam_fit(part, c),
+        seam: seam_fit(&sh.seams, c),
         mat: c.masked.is_some(),
         mean: mean_colour(part, c),
         alt: (is_alt(stem(&c.file)) || (c.masked.is_some() && is_alt(&c.name)))
@@ -313,8 +355,7 @@ fn seams(part: &Part) -> Vec<[[f32; 2]; 4]> {
         .collect()
 }
 
-fn seam_fit(part: &Part, c: &Candidate) -> Option<f32> {
-    let s = seams(part);
+fn seam_fit(s: &[[[f32; 2]; 4]], c: &Candidate) -> Option<f32> {
     if s.len() < 8 {
         return None;
     }
@@ -367,10 +408,11 @@ pub fn choose<'c>(
     context: &str,
     cands: &'c [Candidate],
 ) -> Result<(&'c Candidate, Fit, String), String> {
+    let shape = Shape::of(part);
     let mut fits: Vec<(usize, Fit)> = cands
         .iter()
         .enumerate()
-        .filter_map(|(i, c)| fit(part, material, context, c).map(|f| (i, f)))
+        .filter_map(|(i, c)| fit_shape(&shape, material, context, c).map(|f| (i, f)))
         .filter(|(_, f)| f.precision >= MIN_PRECISION)
         .collect();
     fits.sort_by(|a, b| b.1.score().total_cmp(&a.1.score()).then(a.0.cmp(&b.0)));
@@ -400,7 +442,13 @@ pub fn choose<'c>(
             describe(best, &f)
         ));
     }
-    let runner = fits.get(1);
+    // The runner-up is the best *other image*: the same pixels under another
+    // `.mat` name differ only by name, which the score already weighs.
+    let same = digest(&cands[best].png);
+    let runner = fits
+        .iter()
+        .skip(1)
+        .find(|(i, _)| digest(&cands[*i].png) != same);
     if let Some((i, g)) = runner
         && f.score() - g.score() < MIN_MARGIN
     {
@@ -428,12 +476,22 @@ pub fn candidates(
     files: Option<&crate::source::Files>,
 ) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    // A `.mat` is kept per material even when another shares its image (its
+    // name and cutout flag differ); a bare image only once, and not when a
+    // `.mat` already offers it.
+    let mut images = std::collections::HashSet::new();
+    let mut mats = std::collections::HashSet::new();
     let mut add = |c: Option<Candidate>, out: &mut Vec<Candidate>| {
-        if let Some(c) = c
-            && seen.insert(digest(&c.png))
-        {
-            out.push(c);
+        if let Some(c) = c {
+            let d = digest(&c.png);
+            let new = match c.masked {
+                Some(m) => mats.insert((d, c.name.clone(), m)),
+                None => !images.contains(&d),
+            };
+            if new {
+                images.insert(d);
+                out.push(c);
+            }
         }
     };
     if let Some(p) = package {

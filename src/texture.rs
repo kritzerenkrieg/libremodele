@@ -22,6 +22,11 @@ impl Indexed {
     }
 }
 
+/// Whether `b` is an image the converter decodes: PNG or JPEG.
+pub fn is_image(b: &[u8]) -> bool {
+    b.starts_with(b"\x89PNG") || b.starts_with(&[0xFF, 0xD8, 0xFF])
+}
+
 /// Decode `png`, fit it within `max` (sides a multiple of 8) and reduce to 256 colours.
 pub fn goldsrc_texture(png: &[u8], max: u32) -> Result<Indexed> {
     goldsrc_texture_masked(png, max, false)
@@ -39,7 +44,29 @@ pub fn goldsrc_texture_masked(png: &[u8], max: u32, masked: bool) -> Result<Inde
     let fit = |v: u32| (((v as f32 * scale) as u32) / 8 * 8).max(8);
     let (nw, nh) = (fit(w), fit(h));
     let img = if (nw, nh) != (w, h) {
-        image::imageops::resize(&img, nw, nh, FilterType::Lanczos3)
+        if masked {
+            // Straight alpha: filter premultiplied colour, so transparent
+            // texels' colour can't bleed into the visible edge.
+            let mut pre = img;
+            for p in pre.pixels_mut() {
+                let a = p.0[3] as u32;
+                for c in 0..3 {
+                    p.0[c] = ((p.0[c] as u32 * a + 127) / 255) as u8;
+                }
+            }
+            let mut out = image::imageops::resize(&pre, nw, nh, FilterType::Lanczos3);
+            for p in out.pixels_mut() {
+                let a = p.0[3] as u32;
+                for c in 0..3 {
+                    if let Some(v) = (p.0[c] as u32 * 255 + a / 2).checked_div(a) {
+                        p.0[c] = v.min(255) as u8;
+                    }
+                }
+            }
+            out
+        } else {
+            image::imageops::resize(&img, nw, nh, FilterType::Lanczos3)
+        }
     } else {
         img
     };
@@ -210,6 +237,21 @@ pub fn bmp8(img: &Indexed) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn jpeg_textures_decode() {
+        // VRM files may embed JPEG base-colour textures.
+        let img = image::RgbImage::from_fn(64, 32, |x, _| image::Rgb([x as u8 * 4, 128, 64]));
+        let mut jpg = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut jpg),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+        assert!(is_image(&jpg));
+        let t = goldsrc_texture(&jpg, 512).unwrap();
+        assert_eq!((t.width, t.height), (64, 32));
+    }
+
     use super::*;
 
     #[test]

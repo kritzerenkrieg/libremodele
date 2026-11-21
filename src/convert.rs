@@ -120,7 +120,30 @@ fn chain_of(name: &str) -> Option<(&'static [&'static str], usize)> {
 /// or it prohibits or disallows something.
 pub fn licence_restricted(licence: &str) -> bool {
     let l = licence.to_lowercase();
-    l.is_empty() || l.contains("prohibit") || l.contains("disallow")
+    // Any restriction wins over any grant in the same text.
+    const LIMITS: [&str; 9] = [
+        "prohibit",
+        "disallow",
+        "no redistribution",
+        "not redistribut",
+        "do not redistribut",
+        "don't redistribut",
+        "personal use",
+        "禁止",
+        "再配布不可",
+    ];
+    // Clear grants: VRM's open licences and common permissive terms. (Not
+    // "MIT": terms often name MIT-licensed tools they bundle.)
+    const GRANTS: [&str; 7] = [
+        "redistribution_allowed",
+        "redistribution allowed",
+        "cc0",
+        "cc_by",
+        "cc-by",
+        "cc by",
+        "public domain",
+    ];
+    LIMITS.iter().any(|w| l.contains(w)) || !GRANTS.iter().any(|w| l.contains(w))
 }
 
 pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
@@ -222,6 +245,12 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
         })
         .fold((f32::MAX, f32::MIN), |(a, b), z| (a.min(z), b.max(z)));
     let target = o.height.unwrap_or(dmax - dmin);
+    if !(target.is_finite() && target > 0.0) {
+        bail!("the target height must be a positive number of units, not {target}");
+    }
+    if !(lmax - lmin > 1e-6 && (lmax - lmin).is_finite()) {
+        bail!("the avatar has no height (all its vertices are level)");
+    }
     let s = target / (lmax - lmin);
     let to_gs = |p: V3| mul(c.apply(p), s);
     let ground = lmin * s;
@@ -311,7 +340,11 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
 
     // Root height ratio: the avatar's hips above its feet against the donor's.
     let dground = dmin;
-    let rp = (l_pos("Bip01 Pelvis")[2] - ground) / (d_pos("Bip01 Pelvis")[2] - dground);
+    let dhip = d_pos("Bip01 Pelvis")[2] - dground;
+    if dhip <= 1e-3 {
+        bail!("the donor's Bip01 Pelvis is not above its mesh floor; it can't be a donor");
+    }
+    let rp = (l_pos("Bip01 Pelvis")[2] - ground) / dhip;
     report.push(format!(
         "hip height ratio {rp:.3} (root motion and pelvis offset scale by it)"
     ));
@@ -774,7 +807,10 @@ pub fn convert(av: &Avatar, donor: &Model, o: &Options) -> Result<Converted> {
     let mut order: Vec<usize> = (0..tris.len()).filter(|&i| dist[i].is_some()).collect();
     order.sort_by_key(|&i| (dist[i], i));
     let open = order.len();
-    order.truncate(budget.saturating_sub(tris.len()));
+    // With --keep-polygons the budget is the kept count, so back faces may
+    // still use what is left under the engine cap (G26, D17).
+    let back_cap = if o.keep_polygons { MAX_TRIS } else { budget };
+    order.truncate(back_cap.saturating_sub(tris.len()));
     let backs: Vec<[Corner; 3]> = order
         .iter()
         .map(|&i| {
@@ -1330,4 +1366,27 @@ fn finger_curls(av: &Avatar, to_gs: &dyn Fn(V3) -> V3) -> HashMap<usize, Xf> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::licence_restricted;
+
+    #[test]
+    fn licence_needs_a_clear_grant() {
+        for l in [
+            "",
+            "Redistribution_Prohibited",
+            "Personal use only; no redistribution.",
+            "再配布禁止",
+            "Other: https://example.com/terms",
+            "CC_BY but do not redistribute the textures",
+            "Excluding AudioLink, which is MIT licensed.",
+        ] {
+            assert!(licence_restricted(l), "{l:?} should warn");
+        }
+        for l in ["CC0", "CC_BY_NC", "Redistribution_Allowed", "Public domain"] {
+            assert!(!licence_restricted(l), "{l:?} should not warn");
+        }
+    }
 }

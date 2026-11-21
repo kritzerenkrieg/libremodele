@@ -99,14 +99,15 @@ pub fn load(bytes: &[u8]) -> Result<Avatar> {
             .into_iter()
             .flatten()
         {
-            parent[c.as_u64().ok_or_else(|| anyhow!("bad child"))? as usize] = Some(i);
+            let c = c.as_u64().ok_or_else(|| anyhow!("node {i}: bad child"))? as usize;
+            if c >= jnodes.len() {
+                bail!("node {i}: child {c} is not a node");
+            }
+            parent[c] = Some(i);
         }
     }
     let local: Vec<Xf> = jnodes.iter().map(node_local).collect::<Result<_>>()?;
-    let mut world = vec![None; jnodes.len()];
-    for i in 0..jnodes.len() {
-        world_of(i, &parent, &local, &mut world);
-    }
+    let world = worlds(&parent, &local)?;
     let nodes: Vec<Node> = jnodes
         .iter()
         .enumerate()
@@ -117,7 +118,7 @@ pub fn load(bytes: &[u8]) -> Result<Avatar> {
                 .unwrap_or("")
                 .to_string(),
             parent: parent[i],
-            world: world[i].unwrap(),
+            world: world[i],
         })
         .collect();
 
@@ -292,6 +293,33 @@ pub fn load(bytes: &[u8]) -> Result<Avatar> {
         images.push(g.view(bv as usize)?.to_vec());
     }
 
+    // References the converter indexes without checks.
+    if let Some(p) = parts
+        .iter()
+        .find(|p| p.image.is_some_and(|i| i >= images.len()))
+    {
+        bail!(
+            "{}: texture image {} is not in the file",
+            p.id,
+            p.image.unwrap_or(0)
+        );
+    }
+    if let Some((b, n)) = humanoid.iter().find(|(_, n)| **n >= nodes.len()) {
+        bail!("humanoid bone {b} points at node {n}, which is not in the file");
+    }
+    if let Some(g) = spring_groups.iter().find(|g| {
+        g.roots.iter().any(|&r| r >= nodes.len())
+            || g.colliders.iter().any(|c| c.node >= nodes.len())
+    }) {
+        bail!(
+            "spring group {:?} points at a node that is not in the file",
+            g.name
+        );
+    }
+    if let Some(n) = spring.iter().find(|n| **n >= nodes.len()) {
+        bail!("spring bone node {n} is not in the file");
+    }
+
     let meta = vrm.get("meta");
     let meta_str = |k: &str| {
         meta.and_then(|m| m.get(k))
@@ -301,7 +329,11 @@ pub fn load(bytes: &[u8]) -> Result<Avatar> {
     };
     Ok(Avatar {
         title: meta_str("title"),
-        licence: meta_str("licenseName"),
+        // VRM 0.x: `Other` means the terms are at `otherLicenseUrl`.
+        licence: match (meta_str("licenseName"), meta_str("otherLicenseUrl")) {
+            (l, url) if l == "Other" && !url.is_empty() => format!("Other: {url}"),
+            (l, _) => l,
+        },
         nodes,
         humanoid,
         spring,
@@ -336,6 +368,9 @@ fn floats(v: Option<&Value>) -> Option<Vec<f32>> {
 
 fn node_local(n: &Value) -> Result<Xf> {
     if let Some(m) = floats(n.get("matrix")) {
+        if m.len() != 16 {
+            bail!("bad node matrix: {} values", m.len());
+        }
         return Ok(Xf::from_gltf_matrix(&m));
     }
     let t = floats(n.get("translation")).unwrap_or(vec![0.0; 3]);
@@ -351,16 +386,38 @@ fn node_local(n: &Value) -> Result<Xf> {
     ))
 }
 
-fn world_of(i: usize, parent: &[Option<usize>], local: &[Xf], world: &mut Vec<Option<Xf>>) -> Xf {
-    if let Some(w) = world[i] {
-        return w;
+/// Every node's world transform, without recursion; a parent loop is an error.
+fn worlds(parent: &[Option<usize>], local: &[Xf]) -> Result<Vec<Xf>> {
+    let mut world: Vec<Option<Xf>> = vec![None; local.len()];
+    for i in 0..local.len() {
+        // Walk up to a known ancestor (or the root), then come back down.
+        let mut chain = vec![i];
+        let mut at = i;
+        while world[at].is_none() {
+            match parent[at] {
+                Some(p) => {
+                    if chain.len() > local.len() {
+                        bail!("node {i} is its own ancestor");
+                    }
+                    chain.push(p);
+                    at = p;
+                }
+                None => break,
+            }
+        }
+        for &n in chain.iter().rev() {
+            if world[n].is_none() {
+                world[n] = Some(match parent[n] {
+                    Some(p) => world[p].expect("parent done first").then(&local[n]),
+                    None => local[n],
+                });
+            }
+        }
     }
-    let w = match parent[i] {
-        Some(p) => world_of(p, parent, local, world).then(&local[i]),
-        None => local[i],
-    };
-    world[i] = Some(w);
-    w
+    Ok(world
+        .into_iter()
+        .map(|w| w.expect("every node done"))
+        .collect())
 }
 
 fn is_descendant(i: usize, root: usize, parent: &[Option<usize>]) -> bool {
@@ -409,6 +466,21 @@ fn material(j: &Value, p: &Value) -> Result<(Option<usize>, bool, bool)> {
     Ok((Some(src as usize), unlit, masked))
 }
 
+/// The `TEXCOORD_n` set a primitive's base-colour texture reads.
+fn uv_set(j: &Value, p: &Value) -> u64 {
+    let Some(tex) = p.get("material").and_then(Value::as_u64).and_then(|mi| {
+        j.pointer(&format!(
+            "/materials/{mi}/pbrMetallicRoughness/baseColorTexture"
+        ))
+    }) else {
+        return 0;
+    };
+    tex.pointer("/extensions/KHR_texture_transform/texCoord")
+        .or_else(|| tex.get("texCoord"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
 fn primitive(g: &Glb, p: &Value, node: usize, skin: Option<usize>, nodes: &[Node]) -> Result<Part> {
     if p.get("mode").and_then(Value::as_u64).unwrap_or(4) != 4 {
         bail!("only triangle lists are supported");
@@ -420,18 +492,29 @@ fn primitive(g: &Glb, p: &Value, node: usize, skin: Option<usize>, nodes: &[Node
     };
     let pos = g.accessor_f32(attr("POSITION").ok_or_else(|| anyhow!("no POSITION"))?, 3)?;
     let n = pos.len() / 3;
+    let per_vertex = |what: &str, v: Vec<f32>, comps: usize| -> Result<Vec<f32>> {
+        if v.len() != n * comps {
+            bail!("{what} has {} values for {n} vertices", v.len() / comps);
+        }
+        Ok(v)
+    };
     let nor = match attr("NORMAL") {
-        Some(a) => g.accessor_f32(a, 3)?,
+        Some(a) => per_vertex("NORMAL", g.accessor_f32(a, 3)?, 3)?,
         None => vec![0.0; n * 3],
     };
-    let uv = match attr("TEXCOORD_0") {
-        Some(a) => g.accessor_f32(a, 2)?,
+    // The UV set the base-colour texture reads (glTF `texCoord`).
+    let set = uv_set(&g.j, p);
+    let uv = match attr(&format!("TEXCOORD_{set}")) {
+        Some(a) => per_vertex("TEXCOORD", g.accessor_f32(a, 2)?, 2)?,
         None => vec![0.0; n * 2],
     };
     let idx = match p.get("indices").and_then(Value::as_u64) {
-        Some(a) => g.accessor_u32(a as usize)?,
+        Some(a) => g.accessor_u32(a as usize, 1)?,
         None => (0..n as u32).collect(),
     };
+    if let Some(&bad) = idx.iter().find(|&&i| i as usize >= n) {
+        bail!("index {bad} is past the {n} vertices");
+    }
 
     let mut positions = Vec::with_capacity(n);
     let mut normals = Vec::with_capacity(n);
@@ -450,6 +533,9 @@ fn primitive(g: &Glb, p: &Value, node: usize, skin: Option<usize>, nodes: &[Node
                 .filter_map(Value::as_u64)
                 .map(|v| v as usize)
                 .collect();
+            if let Some(&bad) = joints.iter().find(|&&j| j >= nodes.len()) {
+                bail!("skin {s}: joint {bad} is not a node");
+            }
             let ibm = match js.get("inverseBindMatrices").and_then(Value::as_u64) {
                 Some(a) => g.accessor_f32(a as usize, 16)?,
                 None => [
@@ -457,6 +543,9 @@ fn primitive(g: &Glb, p: &Value, node: usize, skin: Option<usize>, nodes: &[Node
                 ]
                 .repeat(joints.len()),
             };
+            if ibm.len() < joints.len() * 16 {
+                bail!("skin {s}: fewer inverse bind matrices than joints");
+            }
             let skin_m: Vec<Xf> = joints
                 .iter()
                 .enumerate()
@@ -466,8 +555,11 @@ fn primitive(g: &Glb, p: &Value, node: usize, skin: Option<usize>, nodes: &[Node
                         .then(&Xf::from_gltf_matrix(&ibm[k * 16..k * 16 + 16]))
                 })
                 .collect();
-            let jv = g.accessor_u32(ja)?;
-            let wv = g.accessor_f32(wa, 4)?;
+            let jv = g.accessor_u32(ja, 4)?;
+            let wv = per_vertex("WEIGHTS_0", g.accessor_f32(wa, 4)?, 4)?;
+            if jv.len() != n * 4 {
+                bail!("JOINTS_0 has {} values for {n} vertices", jv.len() / 4);
+            }
             for v in 0..n {
                 let p = [pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]];
                 let nn = [nor[v * 3], nor[v * 3 + 1], nor[v * 3 + 2]];
@@ -501,13 +593,10 @@ fn primitive(g: &Glb, p: &Value, node: usize, skin: Option<usize>, nodes: &[Node
         }
         _ => {
             let w = nodes[node].world;
+            let wn = w.r.normal_matrix();
             for v in 0..n {
                 positions.push(w.apply([pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]]));
-                normals.push(norm(w.r.apply([
-                    nor[v * 3],
-                    nor[v * 3 + 1],
-                    nor[v * 3 + 2],
-                ])));
+                normals.push(norm(wn.apply([nor[v * 3], nor[v * 3 + 1], nor[v * 3 + 2]])));
                 let d = nodes[node].parent.unwrap_or(node);
                 dominant.push(d);
                 weights.push(vec![(d, 1.0)]);
@@ -580,7 +669,7 @@ impl Glb {
     }
 
     /// Accessor elements as raw component values: (bytes, component type, count, components, normalized).
-    fn raw(&self, a: usize) -> Result<(Vec<&[u8]>, u64, bool)> {
+    fn raw(&self, a: usize) -> Result<(Vec<&[u8]>, u64, usize, bool)> {
         let acc = self
             .j
             .pointer(&format!("/accessors/{a}"))
@@ -618,6 +707,16 @@ impl Glb {
             .and_then(Value::as_u64)
             .map_or(size * comps, |s| s as usize);
         let off = acc.get("byteOffset").and_then(Value::as_u64).unwrap_or(0) as usize;
+        // The last element must fit the view before anything is allocated.
+        if count > 0 {
+            let end = (count - 1)
+                .checked_mul(stride)
+                .and_then(|x| x.checked_add(off))
+                .and_then(|x| x.checked_add(comps * size));
+            if end.is_none_or(|e| e > view.len()) {
+                bail!("accessor {a} reads past its view");
+            }
+        }
         let mut out = Vec::with_capacity(count * comps);
         for e in 0..count {
             for c in 0..comps {
@@ -631,6 +730,7 @@ impl Glb {
         Ok((
             out,
             ct,
+            comps,
             acc.get("normalized")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
@@ -638,9 +738,9 @@ impl Glb {
     }
 
     fn accessor_f32(&self, a: usize, comps: usize) -> Result<Vec<f32>> {
-        let (vals, ct, normalized) = self.raw(a)?;
-        if vals.len() % comps != 0 {
-            bail!("accessor {a} is not {comps}-component");
+        let (vals, ct, has, normalized) = self.raw(a)?;
+        if has != comps {
+            bail!("accessor {a} has {has} components, expected {comps}");
         }
         vals.iter()
             .map(|b| {
@@ -656,8 +756,11 @@ impl Glb {
             .collect()
     }
 
-    fn accessor_u32(&self, a: usize) -> Result<Vec<u32>> {
-        let (vals, ct, _) = self.raw(a)?;
+    fn accessor_u32(&self, a: usize, comps: usize) -> Result<Vec<u32>> {
+        let (vals, ct, has, _) = self.raw(a)?;
+        if has != comps {
+            bail!("accessor {a} has {has} components, expected {comps}");
+        }
         vals.iter()
             .map(|b| {
                 Ok(match ct {

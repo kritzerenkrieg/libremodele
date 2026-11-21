@@ -76,18 +76,23 @@ async fn model_view(
     weapon: bool,
     state: tauri::State<'_, Shared>,
 ) -> Result<view::ModelView, String> {
-    on_worker(&state, move |s| s.model(weapon).map(view::model_view)).await
+    on_worker(&state, move |s| {
+        let g = s.generation(weapon);
+        s.model(weapon).map(|m| view::model_view(m, g))
+    })
+    .await
 }
 
 /// Texture `index` as raw RGBA bytes.
 #[tauri::command]
 async fn texture(
     weapon: bool,
+    generation: u64,
     index: usize,
     state: tauri::State<'_, Shared>,
 ) -> Result<Response, String> {
     on_worker(&state, move |s| {
-        view::texture_rgba(s.model(weapon)?, index)
+        view::texture_rgba(s.model_at(weapon, generation)?, index)
             .map(Response::new)
             .ok_or_else(|| format!("no texture {index}"))
     })
@@ -99,12 +104,13 @@ async fn texture(
 #[tauri::command]
 async fn bone_frames(
     weapon: bool,
+    generation: u64,
     sequence: Option<usize>,
     blend: usize,
     state: tauri::State<'_, Shared>,
 ) -> Result<Response, String> {
     on_worker(&state, move |s| {
-        let m = s.model(weapon)?;
+        let m = s.model_at(weapon, generation)?;
         let v = view::locals(m, sequence.map(|q| (q, blend)));
         Ok(Response::new(
             v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>(),

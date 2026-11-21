@@ -17,7 +17,7 @@ export interface Rig {
  *  bone-merges by name onto another rig, as Sven's weapon models do. */
 export async function build(parent: THREE.Object3D, weapon: boolean, attachTo?: Rig): Promise<Rig> {
   const view = await api.modelView(weapon);
-  const rest = await api.boneFrames(weapon, null, 0);
+  const rest = await api.boneFrames(weapon, view.generation, null, 0);
 
   const bones = view.bones.map((b) => {
     const bone = new THREE.Bone();
@@ -37,7 +37,12 @@ export async function build(parent: THREE.Object3D, weapon: boolean, attachTo?: 
 
   const textures = await Promise.all(
     view.textures.map(async (t, i) => {
-      const tex = new THREE.DataTexture(await api.texture(weapon, i), t.width, t.height, THREE.RGBAFormat);
+      const tex = new THREE.DataTexture(
+        await api.texture(weapon, view.generation, i),
+        t.width,
+        t.height,
+        THREE.RGBAFormat,
+      );
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.magFilter = THREE.LinearFilter;
       tex.minFilter = THREE.LinearMipmapLinearFilter;

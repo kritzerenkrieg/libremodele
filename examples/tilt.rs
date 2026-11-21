@@ -13,10 +13,12 @@ fn main() {
         let mut worst: f32 = 0.0;
         for f in 0..s.num_frames as usize {
             let pose = preview::bone_worlds(&m, Some((si, f)));
-            // World down, seen from the bone, at rest vs posed (model space).
+            // The root's down, seen from the bone, at rest vs posed: rotations
+            // relative to the root, so turning the whole body doesn't count.
             let down = [0.0, 0.0, -1.0];
-            let r = rest[bi].r.transpose().apply(down);
-            let p = pose[bi].r.transpose().apply(down);
+            let rel = |w: &[libremodele::math::Xf]| w[0].r.transpose().mul(&w[bi].r);
+            let r = rel(&rest).transpose().apply(down);
+            let p = rel(&pose).transpose().apply(down);
             let d = (r[0] * p[0] + r[1] * p[1] + r[2] * p[2])
                 .clamp(-1.0, 1.0)
                 .acos()

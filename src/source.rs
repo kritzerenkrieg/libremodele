@@ -4,7 +4,7 @@
 //! them (G15), outfit-only inputs are refused (G17), and every choice, with
 //! the runners-up, goes to the report.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::Path;
 
@@ -96,17 +96,29 @@ fn scan(root: &Path, dir: &Path, depth: usize, budget: &mut u64) -> Result<Vec<(
     let mut out = Vec::new();
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .with_context(|| format!("reading {}", dir.display()))?
-        .flatten()
-        .collect();
+        .collect::<std::io::Result<_>>()
+        .with_context(|| format!("listing {}", dir.display()))?;
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         let p = e.path();
-        let Ok(meta) = e.metadata() else { continue };
-        if meta.is_dir() {
+        // Not followed: symlinks (they could point outside the download) and
+        // special files such as pipes (reading one can block).
+        let kind = e
+            .file_type()
+            .with_context(|| format!("reading {}", p.display()))?;
+        if kind.is_dir() {
             if depth > 0 {
                 out.extend(scan(root, &p, depth - 1, budget)?);
             }
-        } else if meta.len() <= MAX_FILE {
+            continue;
+        }
+        if !kind.is_file() {
+            continue;
+        }
+        let meta = e
+            .metadata()
+            .with_context(|| format!("reading {}", p.display()))?;
+        if meta.len() <= MAX_FILE {
             *budget = budget.checked_sub(meta.len()).with_context(|| {
                 format!(
                     "{} holds more than {} GB of files; give the avatar's own download folder",
@@ -114,7 +126,10 @@ fn scan(root: &Path, dir: &Path, depth: usize, budget: &mut u64) -> Result<Vec<(
                     MAX_SCAN >> 30
                 )
             })?;
-            out.push((rel_path(root, &p), std::fs::read(&p)?));
+            out.push((
+                rel_path(root, &p),
+                std::fs::read(&p).with_context(|| format!("reading {}", p.display()))?,
+            ));
         }
     }
     Ok(out)
@@ -136,6 +151,7 @@ pub fn unzip(d: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
     let count = u16_at(eocd + 10)?;
     let mut o = u32_at(eocd + 16)?;
     let mut out = Vec::with_capacity(count);
+    let mut budget = MAX_SCAN;
     for _ in 0..count {
         if !d.get(o..).is_some_and(|r| r.starts_with(b"PK\x01\x02")) {
             bail!("zip central directory is damaged");
@@ -159,17 +175,33 @@ pub fn unzip(d: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
         }
         let start = local + 30 + u16_at(local + 26)? + u16_at(local + 28)?;
         let raw = d.get(start..start + csize).context("zip entry truncated")?;
+        // Limits as for folders: files over the per-file cap are skipped,
+        // and the archive as a whole has a budget.
+        if usize_ as u64 > MAX_FILE {
+            continue;
+        }
+        budget = budget
+            .checked_sub(usize_ as u64)
+            .with_context(|| format!("the zip holds more than {} GB of files", MAX_SCAN >> 30))?;
         let data = match method {
             0 => raw.to_vec(),
             8 => {
+                // Inflate at most one byte past the declared size.
                 let mut v = Vec::with_capacity(usize_);
                 flate2::read::DeflateDecoder::new(raw)
+                    .take(usize_ as u64 + 1)
                     .read_to_end(&mut v)
                     .with_context(|| format!("inflating {name}"))?;
                 v
             }
             m => bail!("zip entry {name}: compression method {m} is not supported"),
         };
+        if data.len() != usize_ {
+            bail!(
+                "zip entry {name} has {} bytes, its header says {usize_}",
+                data.len()
+            );
+        }
         out.push((name, data));
     }
     Ok(out)
@@ -217,6 +249,11 @@ fn base(path: &str) -> &str {
 fn dir_of(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(d, _)| d)
 }
+/// The Unity package a `<package>:<asset path>` entry came from; `None` for
+/// loose files.
+fn container(path: &str) -> Option<&str> {
+    path.split_once(':').map(|(c, _)| c)
+}
 /// Number of leading folders two paths share.
 fn shared(a: &str, b: &str) -> usize {
     dir_of(a)
@@ -254,7 +291,12 @@ pub fn find_licence(
     let best = entries
         .iter()
         .filter_map(|(p, d)| rank(p).map(|r| (r, p, d)))
-        .min_by_key(|(r, p, _)| (*r, std::cmp::Reverse(shared(near, p)), p.len()))
+        // Same container first (the same Unity package, or both loose), then
+        // the nearest folder, then the shortest path.
+        .min_by_key(|(r, p, _)| {
+            let other = container(p) != container(near);
+            (*r, other, std::cmp::Reverse(shared(near, p)), p.len())
+        })
         .map(|(_, p, d)| {
             let text = String::from_utf8_lossy(d)
                 .split_whitespace()
@@ -289,6 +331,10 @@ pub struct Chosen {
     pub path: String,
 }
 
+/// An avatar file to try: (path shown, bytes, the package it lives in, the
+/// loose copy it duplicates, tried only if that one fails to load).
+type Candidate<'a> = (String, &'a [u8], Option<String>, Option<String>);
+
 /// Rank the avatar files in `files` and load the best (G16).
 pub fn choose(files: &Files, o: &Overrides) -> Result<Chosen> {
     let is = |p: &str, ext: &str| p.to_lowercase().ends_with(ext);
@@ -309,19 +355,37 @@ pub fn choose(files: &Files, o: &Overrides) -> Result<Chosen> {
         l.contains("quest") || l.contains("android")
     };
     pkgs.sort_by_key(|p| (mobile(p), (*p).clone()));
+    // Read every package once. An unreadable one the user named is an
+    // error; others are skipped with a warning, never silently.
     let mut cache: HashMap<String, Option<Package>> = HashMap::new();
+    let mut pkg_notes = Vec::new();
     for p in &pkgs {
-        cache_pkg(&mut cache, files, p);
+        let read = files.get(p).map(Package::read).transpose();
+        match read {
+            Ok(k) => {
+                cache.insert((*p).clone(), k);
+            }
+            Err(e) if o.package.is_some() => {
+                return Err(e.context(format!("reading the package {p}")));
+            }
+            Err(e) => {
+                pkg_notes.push(format!(
+                    "warning: package {p} can't be read ({e:#}); skipped"
+                ));
+                cache.insert((*p).clone(), None);
+            }
+        }
     }
+    pkgs.retain(|p| cache.get(*p).is_some_and(Option::is_some));
 
     // Candidates: loose files, then avatar files inside packages (a download
     // may be only a package, like Saji's) unless a loose copy exists.
     // (path shown, bytes, the package it lives in)
-    let mut candidates: Vec<(String, &[u8], Option<String>)> = files
+    let mut candidates: Vec<Candidate> = files
         .entries
         .iter()
         .filter(|(p, _)| is(p, ".vrm") || is(p, ".fbx"))
-        .map(|(p, d)| (p.clone(), d.as_slice(), None))
+        .map(|(p, d)| (p.clone(), d.as_slice(), None, None))
         .collect();
     for p in &pkgs {
         let Some(Some(k)) = cache.get(*p) else {
@@ -329,17 +393,25 @@ pub fn choose(files: &Files, o: &Overrides) -> Result<Chosen> {
         };
         for a in &k.assets {
             let Some(d) = &a.data else { continue };
-            if (is(&a.path, ".vrm") || is(&a.path, ".fbx"))
-                && !candidates
-                    .iter()
-                    .any(|(c, _, _)| base(c).eq_ignore_ascii_case(base(&a.path)))
-            {
-                candidates.push((format!("{p}:{}", a.path), d.as_slice(), Some((*p).clone())));
+            if !(is(&a.path, ".vrm") || is(&a.path, ".fbx")) {
+                continue;
             }
+            // A loose copy wins; the packaged one stays as its fallback,
+            // unless the user named the packaged one.
+            let path = format!("{p}:{}", a.path);
+            let named = o.avatar.as_deref() == Some(path.as_str());
+            let loose = candidates
+                .iter()
+                .find(|(c, _, inside, _)| {
+                    inside.is_none() && base(c).eq_ignore_ascii_case(base(&a.path))
+                })
+                .map(|(c, ..)| c.clone());
+            let fallback = if named { None } else { loose };
+            candidates.push((path, d.as_slice(), Some((*p).clone()), fallback));
         }
     }
     if let Some(a) = &o.avatar {
-        candidates.retain(|(p, _, _)| p == a || base(p) == a.as_str());
+        candidates.retain(|(p, ..)| p == a || base(p) == a.as_str());
         if candidates.is_empty() {
             bail!("no avatar file {a:?} in the input");
         }
@@ -347,10 +419,20 @@ pub fn choose(files: &Files, o: &Overrides) -> Result<Chosen> {
     if candidates.is_empty() {
         bail!("no .vrm or .fbx avatar file in the input, loose or in a Unity package (G16)");
     }
-    let mut notes = Vec::new();
+    let mut notes = pkg_notes;
     let mut ranked: Vec<(i64, String, Avatar)> = Vec::new();
     let mut rejected: Vec<String> = Vec::new();
-    for (path, bytes, inside) in &candidates {
+    let mut loaded_ok: HashSet<String> = HashSet::new();
+    for (path, bytes, inside, fallback) in &candidates {
+        // A packaged duplicate is only needed when its loose copy failed.
+        if let Some(loose) = fallback {
+            if loaded_ok.contains(loose) {
+                continue;
+            }
+            notes.push(format!(
+                "avatar (G16): {loose} can't be read; trying the packaged copy {path}"
+            ));
+        }
         let path = path.clone();
         let mut own = false;
         let loaded = if is(&path, ".vrm") {
@@ -369,19 +451,7 @@ pub fn choose(files: &Files, o: &Overrides) -> Result<Chosen> {
                     .map(|p| (*p).clone())
             });
             own = by_name.is_some();
-            let pick = inside
-                .clone()
-                .or_else(|| {
-                    pkgs.iter()
-                        .find(|p| {
-                            cache
-                                .get(**p)
-                                .and_then(Option::as_ref)
-                                .is_some_and(|k| k.file_by_name(base(&path)).is_some())
-                        })
-                        .map(|p| (*p).clone())
-                })
-                .or(pkgs.first().map(|p| (*p).clone()));
+            let pick = by_name.or(pkgs.first().map(|p| (*p).clone()));
             let package = pick
                 .as_ref()
                 .and_then(|p| cache.get(p))
@@ -407,7 +477,10 @@ pub fn choose(files: &Files, o: &Overrides) -> Result<Chosen> {
             })
         };
         let av = match loaded {
-            Ok(av) => av,
+            Ok(av) => {
+                loaded_ok.insert(path.clone());
+                av
+            }
             Err(e) => {
                 rejected.push(format!("{path}: {e:#}"));
                 continue;
@@ -476,17 +549,6 @@ pub fn choose(files: &Files, o: &Overrides) -> Result<Chosen> {
     all.append(&mut av.notes);
     av.notes = all;
     Ok(Chosen { avatar: av, path })
-}
-
-fn cache_pkg<'c>(
-    cache: &'c mut HashMap<String, Option<Package>>,
-    files: &Files,
-    p: &str,
-) -> Option<&'c Package> {
-    cache
-        .entry(p.to_string())
-        .or_insert_with(|| files.get(p).and_then(|d| Package::read(d).ok()))
-        .as_ref()
 }
 
 fn stem(path: &str) -> String {
@@ -583,6 +645,11 @@ pub fn default_name(input: &Path, avatar: &str) -> String {
             .filter(char::is_ascii_alphanumeric)
             .take(MAX_NAME)
             .collect();
+    }
+    // A name with no ASCII letters or digits at all (`アバター`): a neutral
+    // default the user can rename, not an error.
+    if out.is_empty() {
+        out = "avatar".into();
     }
     out
 }

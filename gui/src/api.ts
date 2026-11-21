@@ -71,6 +71,8 @@ export const install = (keepLocal: boolean) => invoke<string>("install", { keepL
 
 // 3D viewer (H4): see gui/src-tauri/src/view.rs.
 export interface ModelView {
+  /** Pass back with texture and frame requests; stale ones are refused. */
+  generation: number;
   name: string;
   bones: { name: string; parent: number }[];
   textures: { name: string; width: number; height: number; masked: boolean }[];
@@ -82,10 +84,14 @@ export interface ModelView {
 }
 
 export const modelView = (weapon: boolean) => invoke<ModelView>("model_view", { weapon });
-export const texture = async (weapon: boolean, index: number) =>
-  new Uint8Array(await invoke<ArrayBuffer>("texture", { weapon, index }));
+export const texture = async (weapon: boolean, generation: number, index: number) =>
+  new Uint8Array(await invoke<ArrayBuffer>("texture", { weapon, generation, index }));
 /** 12 floats per bone per frame: rotation rows, then translation. */
-export const boneFrames = async (weapon: boolean, sequence: number | null, blend: number) =>
-  new Float32Array(await invoke<ArrayBuffer>("bone_frames", { weapon, sequence, blend }));
+export const boneFrames = async (
+  weapon: boolean,
+  generation: number,
+  sequence: number | null,
+  blend: number,
+) => new Float32Array(await invoke<ArrayBuffer>("bone_frames", { weapon, generation, sequence, blend }));
 export const weapons = () => invoke<string[]>("weapons");
 export const loadWeapon = (file: string | null) => invoke<void>("load_weapon", { file });

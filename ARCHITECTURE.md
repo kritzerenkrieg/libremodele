@@ -76,7 +76,7 @@ Convert a VRChat avatar (the user's own or licensed, A6) into a game-ready **ser
 | CLI | `src/main.rs` | `convert <download>` with optional overrides, `preview`, `mdl-info`, `mdl-roundtrip`; writes the output and review trees; re-reads the written MDL and fails if it differs | A7, A14, A15, D9, D16 |
 | Input choice | `src/source.rs` | Opens a zip (own reader), rar (`rars`), folder or single file's folder into `Files`; ranks avatar candidates (VRM first; stencil/outline, alt and Quest/Android penalties; the package's own FBX; triangle count), including `.vrm`/`.fbx` inside packages; picks the package and licence text; refuses unsupported archives; default model name from the download | A15, G15, G16, G21 |
 | Texture pairing | `src/pair.rs` | For an FBX material with no texture: scores candidate images by colour continuity across the part's UV seams, UV precision on opaque texels and file-name similarity, with margins; an authored FBX colour stays flat | G14, G19 |
-| Donor choice | `src/donor.rs` | Real-scale height under 1.4 m → chibi donor (`samples/yuki_ref`), else Sven's stock `gina` from the Steam install; clear error if the needed one is missing; the Sven install and its addon player folder for the GUI | G22, H5 |
+| Donor choice | `src/donor.rs` | Real-scale height under 1.4 m → the built-in chibi donor (`donors/yuki_muumuyu.mdl`, embedded, A6/D7 amended), else Sven's stock `gina` from the Steam install; clear error if the needed one is missing; the Sven install and its addon player folder for the GUI | G22, H5 |
 | VRM reader | `src/vrm.rs` | glb + VRM 0.x JSON: node tree, humanoid map, licence, skinned bind-pose parts with dominant bone and skin weights per vertex, alpha mode (masked), first-person annotations, spring groups and colliders. Defines `Avatar`, the common input both readers produce | A5, B1, C5, D3, D15 |
 | FBX reader | `src/fbx.rs` | Own binary FBX 7.x parser (zlib arrays); Model tree with the full FBX local transform; bind pose from cluster `TransformLink` and BindPose, meshes placed by `TransformLink · Transform`; axes and units from GlobalSettings to Y-up metres; ear-clipped n-gons; parts per (mesh, material slot), slots numbered by first use as Unity does; UVs flipped to top-left; flat-colour parts packed into one swatch texture; humanoid from Unity's map, else by bone name, with skeleton nodes preferred over same-named meshes; PhysBones → spring groups | B9, G1–G3, G5, G6, G10, G18 |
 | Unity package reader | `src/unitypkg.rs` | `.unitypackage` tar.gz → assets by GUID and path; Unity YAML documents; prefab or scene variant; `.mat` colour, `_MainTex` and cutout per renderer slot; the FBX `.meta` material remap (`externalObjects`); prefab-instance material overrides; Unity humanoid map from the FBX `.meta`; VRCPhysBone and collider settings. Objects inside prefab instances are found by Unity's hashed fileID (`xxh64` of the object path); the package FBX is matched to a loose FBX by bone overlap | G2, G4, G5, G10, G11, G18, G20 |
@@ -131,7 +131,7 @@ Run times on the laptop (A8, G8): Lucian 0.2 s; Blondy/Blindy 2–3 s; Neru (63k
 | Entity | Fields that matter | Stored in | Lifetime |
 |---|---|---|---|
 | Avatar source | A download: zip, rar, folder, VRM, or FBX + `.unitypackage`; **licence** (A6, found by G15) | `samples/`, `~/Downloads` or anywhere (never in git) | User's |
-| Donors | chibi `samples/yuki_ref/…/yuki_muumuyu.mdl`; stock `gina.mdl` in the Sven install (G22) | Local files, read only | User's |
+| Donors | chibi `donors/yuki_muumuyu.mdl`, built into the binary (by Yuki, animations by TapChan, shipped with permission); stock `gina.mdl` in the Sven install (G22) | Read only | Yuki and TapChan; Sven Co-op's |
 | `Avatar` (in memory) | nodes with bind-pose world frames, humanoid map, spring set and groups, parts (positions, normals, UVs, dominant bone, skin weights, image, masked), images, reader notes | `src/vrm.rs` | Per run |
 | Clean manifest | per part: keep, rule that fired, override | `out/review/<name>/clean_manifest.json`, fed back with `--manifest` | Per run; the user keeps edited copies |
 | Report | input choice and runners-up, licence, donor and why, reader notes (axes, variant, materials and their source, texture pairing, unresolved references), bones and budget, cleaning, reduction and decimation stats, limits, sway, file size | `out/review/<name>/report.txt` | Per run |
@@ -170,9 +170,9 @@ Nothing is cached between runs (B2 superseded: stages run in memory). Avatar sou
 
 | Attribute | Target | How checked |
 |---|---|---|
-| Limits | Never exceeds A11: 128 bones, 2048 verts/normals and 4080 tris per mesh, 20k tris, textures ≤ 512² (D6); warns above Sven's ~9k tris | `convert` bails or warns; `tests/convert.rs` |
+| Limits | Never exceeds A11: 128 bones, 2048 verts/normals and 4080 tris per mesh, textures ≤ 512² (D6); 20k tris by default, which only `--keep-polygons` may exceed, with a warning (G26); warns above Sven's ~9k tris | `convert` bails or warns; `tests/convert.rs` |
 | Fidelity | Lossless below the budget (C2); above it, no layer clipping (hair through scalp, skin over eyes), no folds, outlines held (C8), small pieces such as irises kept (G23) | Unit tests in `src/reduce.rs` and `src/decimate.rs`; previews; in-game check |
-| Correctness | Written MDL reads back identical; yuki_ref round-trips byte-for-byte; same input gives the same model | `convert` CLI check; `tests/roundtrip.rs`; determinism asserts in `tests/convert.rs` |
+| Correctness | Written MDL reads back identical; the built-in yuki donor round-trips byte-for-byte; same input gives the same model | `convert` CLI check; `tests/roundtrip.rs`; determinism asserts in `tests/convert.rs` |
 | Generality (A15) | Rules aren't tuned to one avatar: a hold-out of three unseen downloads (Saji, Tsumire, Lilyanne) converts with no flags | `downloads_choose` in `tests/convert.rs`; re-run on each new download |
 | Visual | No torn joints or panels; right facing and winding | Preview sheet (G5); winding test; frame strips via `examples/frames.rs` |
 | Animation size | Each sequence's animation data ≤ 64 KB (u16 offsets) | Writer bails; sway budgets root-first |
@@ -225,7 +225,8 @@ libremodele/
   gui/             desktop GUI (H1, H6)
     src/           Svelte front end: App.svelte, Viewer.svelte, rig.ts, api.ts
     src-tauri/     Tauri crate: lib.rs (commands), session.rs, view.rs
-  tests/           roundtrip.rs (yuki_ref); convert.rs (Lucian, Miku, Neru, Poka, Gothic refused, download choice,
+  donors/         yuki_muumuyu.mdl, the built-in chibi donor (A6, D7)
+  tests/           roundtrip.rs (built-in donor); convert.rs (Lucian, Miku, Neru, Poka, Gothic refused, download choice,
                    archives, names); skip without samples
   examples/        dev aids: bones, sway_budget, sway_debug, frames, avatar_info, parents, tilt,
                    closeup, area_loss, determinism, face, fbx_info, fbx_dump

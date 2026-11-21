@@ -28,8 +28,8 @@ the model's Sven animations.
 - **Geometry:** lossless reduction first, then quadric decimation down to the 20k
   triangle cap. Small separate pieces such as irises and earrings stay whole.
   `--keep-polygons` skips decimation altogether.
-- **Textures:** downscaled to Sven's 1024² limit, with a 256-colour palette and masked
-  transparency.
+- **Textures:** downscaled to 512² (Sven allows 1024², but this converter keeps
+  512², D6), with a 256-colour palette and masked transparency.
 - **Optional sway:** hair and skirt bones simulated from the avatar's spring bones, baked
   into each sequence.
 - **Checks:** every written model is re-read and must match exactly. Each conversion also
@@ -79,8 +79,11 @@ Other commands: `preview <file.mdl> <out.png>`, `mdl-info <file.mdl>`,
 
 - Rust 1.88 or newer (edition 2024, let-chains).
 - Node.js 20 or newer, for the desktop app only.
-- Sven Co-op installed through Steam, for the default donor and one-click install.
-  Otherwise pass `--donor <any Sven player .mdl>`.
+- Sven Co-op installed through Steam, for the default donor (`gina`) and one-click
+  install. Without it, give a donor: `--donor <any Sven player .mdl>` on the command
+  line, or the **Donor** field in the app.
+- Short (chibi) avatars, under 1.4 m, use the built-in chibi donor, so they don't need
+  Sven's files.
 
 ## Avatar licences
 
@@ -99,6 +102,7 @@ included in this repository.
 cargo test                    # sample-based tests skip without the git-ignored samples/
 cargo clippy --workspace --all-targets
 cargo fmt --all
+cd gui && npm run check       # type-checks the Svelte front end (svelte-check)
 ```
 
 The project follows [DLAD](https://github.com/kritzerenkrieg/dlad):
@@ -109,4 +113,9 @@ The project follows [DLAD](https://github.com/kritzerenkrieg/dlad):
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+The code is MIT; see [LICENSE](LICENSE).
+
+The built-in chibi donor, `donors/yuki_muumuyu.mdl`, is not covered by the MIT
+licence. Its model is by **Yuki** and its Sven Co-op animations are by **TapChan**,
+and it is included with their permission. It's there to give short avatars a
+skeleton and animations that fit them. Don't redistribute it separately.

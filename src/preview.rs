@@ -188,7 +188,9 @@ pub fn render(
     let mut img = RgbImage::from_pixel(w, h, Rgb(bg));
     let mut z = vec![f32::MIN; (w * h) as usize];
     let (cx, cy, half) = frame;
-    let k = (h as f32 / 2.0) / half;
+    // The framed square (±half) fits the shorter side, so a wide model
+    // isn't cropped in a portrait tile.
+    let k = (w.min(h) as f32 / 2.0) / half;
     let cam = view.toward_camera();
     let light = norm([0.6, 0.5, 0.8]);
     let lit = M3::IDENTITY;
@@ -198,7 +200,12 @@ pub fn render(
         if dot(outward, cam) <= 0.0 {
             continue;
         }
-        let Some(tex) = m.textures.get(t.texture) else {
+        // A texture with no texels (or none at all) can't be sampled.
+        let Some(tex) = m
+            .textures
+            .get(t.texture)
+            .filter(|x| x.width > 0 && x.height > 0 && !x.pixels.is_empty())
+        else {
             continue;
         };
         let shade = 0.7 + 0.3 * dot(norm(lit.apply(outward)), light).max(0.0);
@@ -260,13 +267,18 @@ pub fn render(
                 let tt = w0 * t.st[0][1] + w1 * t.st[1][1] + w2 * t.st[2][1];
                 let tx = (ss.floor() as i32).rem_euclid(tex.width) as usize;
                 let ty = (tt.floor() as i32).rem_euclid(tex.height) as usize;
-                let pi = tex.pixels[ty * tex.width as usize + tx] as usize;
+                let Some(&pi) = tex.pixels.get(ty * tex.width as usize + tx) else {
+                    continue;
+                };
+                let pi = pi as usize;
                 // Masked textures (D6): index 255 is see-through.
                 if pi == 255 && tex.flags & MASKED != 0 {
                     continue;
                 }
                 z[zi] = depth;
-                let c = &tex.palette[pi * 3..pi * 3 + 3];
+                let Some(c) = tex.palette.get(pi * 3..pi * 3 + 3) else {
+                    continue;
+                };
                 img.put_pixel(
                     x as u32,
                     y as u32,
@@ -299,7 +311,13 @@ pub fn sheet(m: &Model, tile: (u32, u32)) -> (RgbImage, Vec<String>) {
             View::Side,
             side,
         ),
-        ("rest back".into(), rest, View::Back, front),
+        // The back view mirrors y, so its centre mirrors too.
+        (
+            "rest back".into(),
+            rest,
+            View::Back,
+            (-front.0, front.1, front.2),
+        ),
     ];
     for name in [
         "idle",

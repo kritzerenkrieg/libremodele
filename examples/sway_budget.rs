@@ -10,14 +10,15 @@ fn main() {
     for s in &m.sequences {
         let f = s.num_frames as usize;
         let per_blend_structs = m.bones.len() * 12;
-        // Existing data, measured by re-encoding.
+        // Existing data, measured with the writer's run-length encoder.
         let existing: usize = s
             .blends
             .iter()
             .flatten()
             .flat_map(|b| b.channels.iter().flatten())
-            .map(|v| 2 * (v.len() + v.len().div_ceil(255)))
+            .map(|v| libremodele::mdl::channel_bytes(v))
             .sum();
+        // Added data: an upper bound (no run-length savings).
         let added = s.blends.len() * n * 3 * 2 * (f + f.div_ceil(255));
         total_add += added;
         let span = s.blends.len() * per_blend_structs + existing + added;

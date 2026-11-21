@@ -1,4 +1,4 @@
-//! Dev aid: surface area per texture (mesh skinref) at rest, for comparing
+//! Dev aid: surface area per texture (through the skin family) at rest, for comparing
 //! two conversions of the same avatar.
 use libremodele::math::{cross, len, sub};
 use libremodele::{mdl, preview};
@@ -12,6 +12,12 @@ fn main() {
             let sm = &bp.models[0];
             let p = |i: i16| w[sm.vert_bones[i as usize] as usize].apply(sm.verts[i as usize]);
             for me in &sm.meshes {
+                // skinref is a skin-family column; resolve it to a texture.
+                let tex = m
+                    .skin_families
+                    .first()
+                    .and_then(|f| f.get(me.skinref as usize))
+                    .map_or(me.skinref as usize, |&t| t as usize);
                 for c in &me.commands {
                     let v = &c.verts;
                     for i in 0..v.len().saturating_sub(2) {
@@ -21,8 +27,8 @@ fn main() {
                             [v[i], v[i + 1], v[i + 2]]
                         };
                         let (a, b, cc) = (p(t[0][0]), p(t[1][0]), p(t[2][0]));
-                        area[me.skinref as usize] += len(cross(sub(b, a), sub(cc, a))) / 2.0;
-                        tris[me.skinref as usize] += 1;
+                        area[tex] += len(cross(sub(b, a), sub(cc, a))) / 2.0;
+                        tris[tex] += 1;
                     }
                 }
             }

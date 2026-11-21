@@ -26,7 +26,7 @@
 //! adds penalty planes along borders and seams so their outlines hold.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, BinaryHeap, HashMap};
+use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
 
 use crate::math::{V3, cross, dot, len, norm, sub};
 
@@ -104,11 +104,30 @@ fn small_pieces(
 /// Clearances are measured up to this far (game units); beyond, no cap.
 const CLEARANCE_RANGE: f32 = 1.5;
 
+/// Closest distance from `p` to the segment `a`–`b`.
+fn point_segment(p: V3, a: V3, b: V3) -> f32 {
+    let ab = sub(b, a);
+    let l2 = dot(ab, ab);
+    let t = if l2 > 0.0 {
+        (dot(sub(p, a), ab) / l2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    len(sub(p, [0, 1, 2].map(|k| a[k] + ab[k] * t)))
+}
+
 /// Closest distance from `p` to triangle `t` (Ericson, Real-Time Collision
 /// Detection, 5.1.5).
 fn point_tri(p: V3, t: [V3; 3]) -> f32 {
     let [a, b, c] = t;
     let (ab, ac, ap) = (sub(b, a), sub(c, a), sub(p, a));
+    // A degenerate (zero-area) triangle is its edges; the region tests
+    // below would divide by zero.
+    if len(cross(ab, ac)) < 1e-9 {
+        return point_segment(p, a, b)
+            .min(point_segment(p, b, c))
+            .min(point_segment(p, c, a));
+    }
     let (d1, d2) = (dot(ab, ap), dot(ac, ap));
     if d1 <= 0.0 && d2 <= 0.0 {
         return len(ap);
@@ -182,9 +201,21 @@ impl Layers {
                 Self::cell([0, 1, 2].map(|k| ps.iter().map(|p| p[k]).fold(f32::MAX, f32::min)));
             let hi =
                 Self::cell([0, 1, 2].map(|k| ps.iter().map(|p| p[k]).fold(f32::MIN, f32::max)));
+            // Only cells the triangle's plane passes through (centre within
+            // half a cell diagonal of it), not the whole bounding box: a long
+            // diagonal face would otherwise fill a volume of cells.
+            let n = cross(sub(ps[1], ps[0]), sub(ps[2], ps[0]));
+            let nl = len(n);
+            let slab = CLEARANCE_RANGE * 0.5 * 3f32.sqrt();
             for x in lo[0]..=hi[0] {
                 for y in lo[1]..=hi[1] {
                     for z in lo[2]..=hi[2] {
+                        if nl > 1e-12 {
+                            let centre = [x, y, z].map(|i| (i as f32 + 0.5) * CLEARANCE_RANGE);
+                            if dot(sub(centre, ps[0]), n).abs() / nl > slab {
+                                continue;
+                            }
+                        }
                         grid.entry([x, y, z]).or_default().push(list.len());
                     }
                 }
@@ -417,6 +448,28 @@ fn plan(m: &Mesh, q: &[Quad], u: usize, v: usize, stage: u8) -> Option<Plan> {
     // Link condition: the only shared neighbours are the edge's opposite corners.
     let (ru, rv) = (m.ring(u), m.ring(v));
     if ru.intersection(&rv).count() != et.len() {
+        return None;
+    }
+    // No duplicate faces: a triangle of u, with u moved onto v, must not
+    // coincide with one v already has (a tetrahedron passes the link test).
+    let face = |t: usize, from: usize| {
+        let mut k = m.tris[t]
+            .unwrap()
+            .map(|x| if x.0 == from { v } else { x.0 });
+        k.sort_unstable();
+        k
+    };
+    let at_v: HashSet<[usize; 3]> = m
+        .live(v)
+        .iter()
+        .filter(|t| !et.contains(t))
+        .map(|&t| face(t, usize::MAX))
+        .collect();
+    if around
+        .iter()
+        .filter(|t| !et.contains(t))
+        .any(|&t| at_v.contains(&face(t, u)))
+    {
         return None;
     }
     // Locks by stage.
@@ -909,6 +962,42 @@ mod tests {
         assert_eq!((st.whole_pieces, st.whole_tris), (1, small.len()));
         let kept = r.iter().filter(|t| t[0].p[0] > 40.0).count();
         assert_eq!(kept, small.len());
+    }
+
+    #[test]
+    fn tetrahedron_collapse_makes_no_duplicate_faces() {
+        // One bone, one texture, constant UVs: every edge passes the link
+        // test, but collapsing one would leave two coincident faces.
+        let v = |p: V3| Vtx {
+            bone: 0,
+            tex: 0,
+            p,
+            n: norm(p),
+            st: [0, 0],
+        };
+        let p = [
+            [1.0, 1.0, 1.0],
+            [1.0, -1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+        ];
+        let t: Vec<[Vtx; 3]> = [[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]]
+            .iter()
+            .map(|f: &[usize; 3]| f.map(|i| v(p[i])))
+            .collect();
+        let (r, _) = decimate(&t, 2);
+        let mut faces: Vec<[[u32; 3]; 3]> = r
+            .iter()
+            .map(|t| {
+                let mut f = t.map(|c| c.p.map(f32::to_bits));
+                f.sort_unstable();
+                f
+            })
+            .collect();
+        let n = faces.len();
+        faces.sort_unstable();
+        faces.dedup();
+        assert_eq!(faces.len(), n, "duplicate faces: {r:?}");
     }
 
     #[test]

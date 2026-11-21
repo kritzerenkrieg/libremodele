@@ -1,5 +1,5 @@
-//! A10: the MDL writer reproduces a real Sven Co-op model. The sample is a
-//! licensed local file (A6) kept out of git, so the test skips without it.
+//! A10: the MDL writer reproduces a real Sven Co-op model: the built-in chibi
+//! donor, or any MDL named by `LIBREMODELE_SAMPLE_MDL`.
 
 use std::path::PathBuf;
 
@@ -9,15 +9,15 @@ fn sample() -> Option<Vec<u8>> {
     let path = std::env::var_os("LIBREMODELE_SAMPLE_MDL")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("samples/yuki_ref/models/player/yuki_muumuyu/yuki_muumuyu.mdl")
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("donors/yuki_muumuyu.mdl")
         });
     match std::fs::read(&path) {
         Ok(b) => Some(b),
-        Err(_) => {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             eprintln!("skipped: no sample at {}", path.display());
             None
         }
+        Err(e) => panic!("reading {}: {e}", path.display()),
     }
 }
 

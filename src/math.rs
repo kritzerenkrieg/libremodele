@@ -52,6 +52,20 @@ impl M3 {
     pub fn apply(&self, v: V3) -> V3 {
         [dot(self.0[0], v), dot(self.0[1], v), dot(self.0[2], v)]
     }
+    /// The matrix for transforming normals: the inverse transpose up to a
+    /// positive scale (cofactors, signed by the determinant). Normalise after.
+    pub fn normal_matrix(&self) -> M3 {
+        let m = self.0;
+        let c = |r: usize, k: usize| {
+            let (r1, r2, k1, k2) = ((r + 1) % 3, (r + 2) % 3, (k + 1) % 3, (k + 2) % 3);
+            m[r1][k1] * m[r2][k2] - m[r1][k2] * m[r2][k1]
+        };
+        let det = m[0][0] * c(0, 0) + m[0][1] * c(0, 1) + m[0][2] * c(0, 2);
+        let s = if det < 0.0 { -1.0 } else { 1.0 };
+        M3(std::array::from_fn(|r| {
+            std::array::from_fn(|k| s * c(r, k))
+        }))
+    }
     pub fn transpose(&self) -> M3 {
         let m = self.0;
         M3([
@@ -109,8 +123,11 @@ impl M3 {
     /// The inverse of `from_gs_angles` for a rotation matrix.
     pub fn to_gs_angles(&self) -> V3 {
         let m = self.0;
-        let y = (-m[2][0]).clamp(-1.0, 1.0).asin();
-        if m[2][0].abs() < 0.99999 {
+        // Pitch from atan2 (cos pitch from the yaw column), so roll and yaw
+        // stay recoverable until the matrix truly loses them.
+        let cp = m[0][0].hypot(m[1][0]);
+        let y = (-m[2][0]).atan2(cp);
+        if cp > 1e-6 {
             [m[2][1].atan2(m[2][2]), y, m[1][0].atan2(m[0][0])]
         } else {
             // Gimbal lock: put all of the remaining turn on z.
@@ -124,7 +141,19 @@ impl M3 {
         if c > 1.0 - 1e-7 {
             return M3::IDENTITY;
         }
-        if c < -1.0 + 1e-6 {
+        let v = cross(a, b);
+        let sn = len(v);
+        // Near a half turn the axis is still resolvable from the cross
+        // product: rotate about it by atan2(|a×b|, a·b) (Rodrigues).
+        if c < 0.0 && sn > 1e-7 {
+            let k = mul(v, 1.0 / sn);
+            let km = M3([[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]]);
+            let t = sn.atan2(c);
+            return M3::IDENTITY
+                .plus(&km.scaled(t.sin()))
+                .plus(&km.mul(&km).scaled(1.0 - t.cos()));
+        }
+        if c < 0.0 {
             let helper = if a[0].abs() < 0.9 {
                 [1.0, 0.0, 0.0]
             } else {
@@ -134,7 +163,6 @@ impl M3 {
             let outer = M3([mul(k, k[0]), mul(k, k[1]), mul(k, k[2])]);
             return outer.scaled(2.0).plus(&M3::IDENTITY.scaled(-1.0));
         }
-        let v = cross(a, b);
         let k = M3([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]]);
         M3::IDENTITY
             .plus(&k)
@@ -203,6 +231,24 @@ impl Xf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn align_resolves_near_half_turns() {
+        let a = [1.0, 0.0, 0.0];
+        let b = [-(0.001f32).cos(), (0.001f32).sin(), 0.0];
+        let r = M3::align(a, b).apply(a);
+        assert!(len(sub(r, b)) < 1e-4, "{r:?}");
+    }
+
+    #[test]
+    fn euler_keeps_roll_near_gimbal_lock() {
+        let x = [std::f32::consts::FRAC_PI_2, 1.567, 0.0];
+        let m = M3::from_gs_angles(x);
+        let back = M3::from_gs_angles(m.to_gs_angles());
+        for r in 0..3 {
+            assert!(len(sub(m.0[r], back.0[r])) < 1e-4, "{:?} vs {:?}", m, back);
+        }
+    }
+
     use super::*;
 
     fn close(a: &M3, b: &M3) -> bool {

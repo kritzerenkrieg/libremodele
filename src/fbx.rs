@@ -9,6 +9,10 @@ use std::io::Read;
 
 use anyhow::{Context, Result, anyhow, bail};
 
+/// Largest decoded FBX array (bytes): inputs are capped at 200 MB (G16), and a
+/// 65k-triangle avatar's biggest array is a few MB.
+const MAX_ARRAY_BYTES: usize = 512 << 20;
+
 use crate::math::{M3, V3, Xf, cross, dot, len, norm, sub};
 use crate::unitypkg::{self, Package};
 use crate::vrm::{Avatar, Node, Part, SpringGroup};
@@ -148,6 +152,17 @@ impl Reader<'_> {
         if end > self.d.len() {
             bail!("FBX node `{name}` ends past the file");
         }
+        // The end must not move the reader backwards (re-parsing the same bytes).
+        if end < self.o {
+            bail!("FBX node `{name}` ends before its own header");
+        }
+        // Every property takes at least one byte, so the count can't exceed them.
+        if nprops > (end - self.o) as u64 {
+            bail!(
+                "FBX node `{name}` claims {nprops} properties in {} bytes",
+                end - self.o
+            );
+        }
         let mut props = Vec::with_capacity(nprops as usize);
         for _ in 0..nprops {
             props.push(self.prop()?);
@@ -200,19 +215,26 @@ impl Reader<'_> {
                     b'd' | b'l' => 8,
                     _ => 1,
                 };
+                let want = n
+                    .checked_mul(size)
+                    .filter(|&b| b <= MAX_ARRAY_BYTES)
+                    .with_context(|| format!("FBX array of {n} elements is too large"))?;
                 let data = match enc {
                     0 => raw.to_vec(),
                     1 => {
-                        let mut out = Vec::with_capacity(n * size);
+                        // Inflate at most one byte past the declared size, so a
+                        // bomb can't grow the buffer before the length check.
+                        let mut out = Vec::with_capacity(want);
                         flate2::read::ZlibDecoder::new(raw)
+                            .take(want as u64 + 1)
                             .read_to_end(&mut out)
                             .context("FBX array inflate")?;
                         out
                     }
                     e => bail!("FBX array encoding {e}"),
                 };
-                if data.len() != n * size {
-                    bail!("FBX array has {} bytes, expected {}", data.len(), n * size);
+                if data.len() != want {
+                    bail!("FBX array has {} bytes, expected {want}", data.len());
                 }
                 let ch = data.chunks_exact(size);
                 match t {
@@ -335,6 +357,25 @@ fn apply_dir(m: &M4, p: [f64; 3]) -> [f64; 3] {
     let mut o = [0.0; 3];
     for (r, v) in o.iter_mut().enumerate() {
         *v = m[r][0] * p[0] + m[r][1] * p[1] + m[r][2] * p[2];
+    }
+    o
+}
+/// `m`'s linear part for normals: the inverse transpose, up to scale (the
+/// cofactor matrix, signed by the determinant), so non-uniform scale keeps
+/// normals perpendicular to their faces. Normalise the result.
+fn normal_matrix(m: &M4) -> M4 {
+    let c = |r: usize, k: usize| {
+        let (r1, r2) = ((r + 1) % 3, (r + 2) % 3);
+        let (k1, k2) = ((k + 1) % 3, (k + 2) % 3);
+        m[r1][k1] * m[r2][k2] - m[r1][k2] * m[r2][k1]
+    };
+    let det = m[0][0] * c(0, 0) + m[0][1] * c(0, 1) + m[0][2] * c(0, 2);
+    let s = if det < 0.0 { -1.0 } else { 1.0 };
+    let mut o = I4;
+    for (r, row) in o.iter_mut().take(3).enumerate() {
+        for (k, v) in row.iter_mut().take(3).enumerate() {
+            *v = s * c(r, k);
+        }
     }
     o
 }
@@ -534,6 +575,10 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
         .iter()
         .filter_map(|o| o.int(0).map(|id| (id, o)))
         .collect();
+    // Every object is looked up by its ID below; one without is malformed.
+    if let Some(o) = objects.children.iter().find(|o| o.int(0).is_none()) {
+        bail!("FBX object `{}` has no ID", o.name);
+    }
     // Connections: (child, parent) for OO, plus property links.
     let mut parent_of: HashMap<i64, i64> = HashMap::new();
     let mut children_of: HashMap<i64, Vec<i64>> = HashMap::new();
@@ -545,7 +590,7 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
         let (Some(ca), Some(cb)) = (by_id.get(&a), by_id.get(&b)) else {
             continue;
         };
-        if ca.name == "Model" && cb.name == "Model" {
+        if c.str(0) == Some("OO") && ca.name == "Model" && cb.name == "Model" {
             parent_of.insert(a, b);
         }
     }
@@ -575,6 +620,17 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
                 .copied()
         })
         .collect();
+    // A parent loop would recurse forever in the world and ancestry walks.
+    for (start, model) in models.iter().enumerate() {
+        let (mut at, mut steps) = (start, 0);
+        while let Some(p) = parent[at] {
+            steps += 1;
+            if steps > parent.len() {
+                bail!("FBX model `{}` is its own ancestor", obj_name(model));
+            }
+            at = p;
+        }
+    }
     let local: Vec<M4> = models.iter().map(|m| local_of(m)).collect::<Result<_>>()?;
 
     // Bind pose: cluster TransformLink, else BindPose matrix, else parent · local.
@@ -718,7 +774,14 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
     let mut images: Vec<Vec<u8>> = Vec::new();
     let mut image_of: HashMap<String, Option<usize>> = HashMap::new();
     let mut find_image = |name: &str, data: Option<Vec<u8>>, notes: &mut Vec<String>| {
-        *image_of.entry(name.to_lowercase()).or_insert_with(|| {
+        // Explicit bytes (a `.mat`'s texture) are cached by content, so two
+        // different images that share a file name stay apart, and an earlier
+        // miss by name can't hide them.
+        let key = match &data {
+            Some(b) => format!("bytes:{:016x}", crate::unitypkg::xxh64(b)),
+            None => format!("name:{}", name.to_lowercase()),
+        };
+        *image_of.entry(key).or_insert_with(|| {
             let bytes = data
                 .or_else(|| l.package.and_then(|p| p.file_by_name(name)))
                 .or_else(|| {
@@ -727,13 +790,13 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
                         .map(<[u8]>::to_vec)
                 });
             match bytes {
-                Some(b) if b.starts_with(b"\x89PNG") => {
+                Some(b) if crate::texture::is_image(&b) => {
                     images.push(b);
                     Some(images.len() - 1)
                 }
                 Some(_) => {
                     notes.push(format!(
-                        "warning: texture {name} is not a PNG; drawn as a flat colour"
+                        "warning: texture {name} is not a PNG or JPEG; drawn as a flat colour"
                     ));
                     None
                 }
@@ -858,8 +921,12 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
                 None
             };
             Ok(Attr::Some {
-                by_vertex: matches!(mapping, "ByVertice" | "ByVertex" | "ByControlPoint"),
-                all_same: mapping == "AllSame",
+                mapping: match mapping {
+                    "ByVertice" | "ByVertex" | "ByControlPoint" => Mapping::Vertex,
+                    "AllSame" => Mapping::AllSame,
+                    "ByPolygon" => Mapping::Polygon,
+                    _ => Mapping::Corner,
+                },
                 values,
                 index,
                 comps,
@@ -933,6 +1000,7 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
                     HashMap::new(),
                 )
             });
+            let to_world_n = normal_matrix(&to_world);
             let cp_pos = |cp: usize| {
                 f3(apply(
                     &to_world,
@@ -944,7 +1012,7 @@ pub fn load(bytes: &[u8], l: &Load) -> Result<Avatar> {
             for &(cp, k) in &poly {
                 let n = nattr
                     .get(cp, k, pi)
-                    .map_or([0.0; 3], |n| f3(apply_dir(&to_world, [n[0], n[1], n[2]])));
+                    .map_or([0.0; 3], |n| f3(apply_dir(&to_world_n, [n[0], n[1], n[2]])));
                 let n = norm(n);
                 // FBX UV origin is bottom-left; glTF (and our parts) top-left.
                 let uv = uattr
@@ -1346,11 +1414,22 @@ fn world_raw(i: usize, parent: &[Option<usize>], local: &[M4], bind: &HashMap<us
 /// (control point, normal bits, UV bits): corners that weld into one vertex.
 type WeldKey = (u32, [u32; 3], [u32; 2]);
 
+/// How a layer element's values map onto the mesh.
+#[derive(Clone, Copy)]
+enum Mapping {
+    AllSame,
+    /// One per control point.
+    Vertex,
+    /// One per polygon.
+    Polygon,
+    /// One per polygon vertex (corner).
+    Corner,
+}
+
 enum Attr {
     None,
     Some {
-        by_vertex: bool,
-        all_same: bool,
+        mapping: Mapping,
         values: Vec<f64>,
         index: Option<Vec<i64>>,
         comps: usize,
@@ -1361,8 +1440,7 @@ impl Attr {
     /// Value for control point `cp`, polygon-vertex `k` of polygon `p`.
     fn get(&self, cp: usize, k: usize, p: usize) -> Option<&[f64]> {
         let Attr::Some {
-            by_vertex,
-            all_same,
+            mapping,
             values,
             index,
             comps,
@@ -1370,13 +1448,11 @@ impl Attr {
         else {
             return None;
         };
-        let _ = p;
-        let i = if *all_same {
-            0
-        } else if *by_vertex {
-            cp
-        } else {
-            k
+        let i = match mapping {
+            Mapping::AllSame => 0,
+            Mapping::Vertex => cp,
+            Mapping::Polygon => p,
+            Mapping::Corner => k,
         };
         let i = match index {
             Some(ix) => usize::try_from(*ix.get(i)?).ok()?,
@@ -1597,14 +1673,15 @@ mod tests {
 
     #[test]
     fn concave_polygon_is_ear_clipped_without_overlap() {
-        // An L shape: a fan from vertex 0 would leave the notch covered.
+        // An L shape starting at (2, 1), which can't see the whole interior:
+        // a fan from vertex 0 would cover the notch with a flipped triangle.
         let pts: Vec<V3> = [
-            [0.0, 0.0],
-            [2.0, 0.0],
             [2.0, 1.0],
             [1.0, 1.0],
             [1.0, 2.0],
             [0.0, 2.0],
+            [0.0, 0.0],
+            [2.0, 0.0],
         ]
         .iter()
         .map(|p| [p[0], p[1], 0.0])
@@ -1620,6 +1697,19 @@ mod tests {
             })
             .sum();
         assert!((area - 3.0).abs() < 1e-5, "{area}");
+    }
+
+    #[test]
+    fn normals_use_the_inverse_transpose() {
+        // x scaled by 2: the plane x + y = 0's normal (1, 1, 0) becomes (1, 2, 0).
+        let mut m = I4;
+        m[0][0] = 2.0;
+        let n = apply_dir(&normal_matrix(&m), [1.0, 1.0, 0.0]);
+        assert!((n[1] / n[0] - 2.0).abs() < 1e-9 && n[2] == 0.0, "{n:?}");
+        // A mirror keeps the normal on the face's outside.
+        m[0][0] = -1.0;
+        let n = apply_dir(&normal_matrix(&m), [1.0, 0.0, 0.0]);
+        assert!(n[0] < 0.0, "{n:?}");
     }
 
     #[test]
