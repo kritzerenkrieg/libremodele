@@ -136,6 +136,14 @@ Starts once H1–H6 are Decided (A7). Tasks are written when they are.
 - [x] Licence warning with a tick-box before install (H5, A6, A13). Done when: install is disabled until ticked for a non-redistributable licence. Passed 2026-11-21: `install` refuses without the tick (`inspect_convert_install`); button disabled in the UI
 - [x] Update `ARCHITECTURE.md` (H codes). Done when: sections B to J match the code. Passed 2026-11-21
 
+## Phase I: Release builds
+
+Decided in I1–I4.
+
+- [x] Decide I1–I4 (2026-11-21).
+- [ ] Release workflow `.github/workflows/release.yml`: checks, then Windows and Debian builds, then a GitHub Release for tags (I1–I4). Done when: a manual run passes and produces the `.exe`, `.msi`, `.deb` and both CLI archives.
+- [ ] First tagged release. Done when: pushing `v0.1.0` publishes a release with all five files, and the user installs the Windows or Debian build.
+
 ## Cycle: feature and maintenance
 
 Candidate future features (each one a Question row first): outfit toggles as bodygroups (B6), Source flex visemes (B7), Sven Co-op high-limit profile (A4), FastDLX upload integration (E4).
