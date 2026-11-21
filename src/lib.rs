@@ -8,6 +8,7 @@ pub mod fbx;
 pub mod math;
 pub mod mdl;
 pub mod pair;
+pub mod pipeline;
 pub mod preview;
 pub mod reduce;
 pub mod source;

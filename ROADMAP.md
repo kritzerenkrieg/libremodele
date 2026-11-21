@@ -123,6 +123,19 @@ flowchart LR
 - [x] `--keep-polygons` (G26): skips lossy decimation past the 20k cap with a warning. Check: Lilyanne keeps all 39,017 triangles in 11 bodyparts and re-reads identically; `neru_converts` asserts it.
 - [x] Fingers curled into a grip during the repose (G27). Check: Sven's `p_9mmhandgun.mdl` bone-merged onto Lilyanne in `ref_aim_onehanded` sits in a fist (was at the wrist past open fingers); `neru_converts` asserts 30 curled joints.
 
+## Phase H: Desktop GUI
+
+Starts once H1–H6 are Decided (A7). Tasks are written when they are.
+
+- [x] Decide H1–H6 (2026-11-20).
+- [x] Pipeline in the library: move the convert steps (open, choose, donor, convert, sway, write, re-read, preview) from `main.rs` into `src/pipeline.rs`, used by the CLI and the GUI (H6). Done when: CLI output is byte-identical for neru and all tests pass. Passed 2026-11-20: neru and lilyanne_sway `.mdl`/`.bmp` identical
+- [x] Workspace + Tauri 2/Svelte scaffold in `gui/` (H1, H6). Done when: `cargo build -p libremodele-gui` and the front-end build pass. Passed 2026-11-21
+- [ ] Backend commands: inspect a download (choices, licence, donor, warnings), convert on a worker thread with progress events, install (H2, H3, H5). Done when: a Rust test drives inspect → convert → install into a temp addon folder
+- [ ] Svelte UI: drop/pick, choices panel, main controls + Advanced, convert with progress, report (H2, H3). Done when: the user converts and installs an avatar from the window
+- [ ] 3D viewer: meshes and textures from the converted model, bone transforms per frame, turntable and sequence picker (H4). Done when: the user sees idle and a weapon sequence play in the window
+- [ ] Licence warning with a tick-box before install (H5, A6, A13). Done when: install is disabled until ticked for a non-redistributable licence
+- [ ] Update `ARCHITECTURE.md` (H codes). Done when: sections B to J match the code
+
 ## Cycle: feature and maintenance
 
 Candidate future features (each one a Question row first): outfit toggles as bodygroups (B6), Source flex visemes (B7), Sven Co-op high-limit profile (A4), FastDLX upload integration (E4).

@@ -1,0 +1,20 @@
+[package]
+name = "libremodele-gui"
+version = "0.1.0"
+edition = "2024"
+description = "Desktop GUI for libremodele (H1, H6)"
+license = "MIT"
+publish = false
+
+[lib]
+name = "libremodele_gui"
+crate-type = ["rlib"]
+
+[dependencies]
+libremodele = { path = "../.." }
+serde = { version = "1.0.229", features = ["derive"] }
+tauri = "2"
+tauri-plugin-dialog = "2"
+
+[build-dependencies]
+tauri-build = "2"

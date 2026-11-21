@@ -6,6 +6,10 @@ description = "Standalone converter from VRChat avatars to GoldSrc and Source pl
 license = "MIT"
 publish = false
 
+[workspace]
+# H6: the library + CLI (this crate) and the Tauri GUI.
+members = [".", "gui/src-tauri"]
+
 [dependencies]
 anyhow = "1"
 flate2 = "1.1.11"

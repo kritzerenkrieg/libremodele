@@ -3,3 +3,7 @@
 /samples
 /out
 /work
+# GUI build outputs and npm packages (H6).
+/gui/node_modules
+/gui/dist
+/gui/src-tauri/gen

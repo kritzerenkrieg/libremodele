@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use libremodele::{convert, mdl, preview, source, sway, texture};
+use libremodele::{mdl, pipeline, preview};
 
 const USAGE: &str = "usage:
   libremodele convert <download.zip | download.rar | folder | avatar.vrm | avatar.fbx> [--sway]
@@ -47,8 +47,7 @@ fn run(args: &[String]) -> Result<()> {
 }
 
 fn load(path: &str) -> Result<mdl::Model> {
-    let bytes = std::fs::read(path).with_context(|| format!("reading {path}"))?;
-    mdl::read(&bytes).with_context(|| format!("parsing {path}"))
+    pipeline::read_mdl(Path::new(path))
 }
 
 fn flag<'a>(rest: &[&'a str], name: &str) -> Option<&'a str> {
@@ -81,15 +80,13 @@ fn convert_cmd(input: &str, rest: &[&str]) -> Result<()> {
             }
         }
     }
-
     // A15, G16: everything is chosen from the input; flags only override.
-    let (files, file) = source::Files::open(Path::new(input))?;
-    let overrides = source::Overrides {
-        avatar: flag(rest, "--avatar").map(str::to_string).or(file),
-        package: flag(rest, "--package").map(|p| {
-            // A path outside the input is read as is.
-            p.to_string()
-        }),
+    let req = pipeline::Request {
+        input: PathBuf::from(input),
+        name: flag(rest, "--name").map(str::to_string),
+        donor: flag(rest, "--donor").map(PathBuf::from),
+        avatar: flag(rest, "--avatar").map(str::to_string),
+        package: flag(rest, "--package").map(str::to_string),
         licence: flag(rest, "--licence").map(str::to_string),
         variant: flag(rest, "--variant").map(str::to_string),
         materials: rest
@@ -104,141 +101,18 @@ fn convert_cmd(input: &str, rest: &[&str]) -> Result<()> {
                     })
             })
             .collect::<Result<_>>()?,
+        height,
+        max_tris,
+        keep_polygons: rest.contains(&"--keep-polygons"),
+        sway: rest.contains(&"--sway"),
+        keep,
     };
-    let mut files = files;
-    if let Some(p) = &overrides.package
-        && files.get(p).is_none()
-        && !files
-            .entries
-            .iter()
-            .any(|(e, _)| e.ends_with(&format!("/{p}")))
-    {
-        let data = std::fs::read(p).with_context(|| format!("reading {p}"))?;
-        files.entries.push((p.clone(), data));
-    }
-    let chosen = source::choose(&files, &overrides).with_context(|| format!("reading {input}"))?;
-    let av = chosen.avatar;
-    let name = match flag(rest, "--name") {
-        Some(n) => n.to_string(),
-        None => source::default_name(Path::new(input), &chosen.path),
-    };
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        bail!("--name must be ASCII letters, digits, _ or -");
-    }
-    let name = name.as_str();
-    // G22: --donor overrides; otherwise chosen from the avatar's height.
-    let donor_path = match flag(rest, "--donor") {
-        Some(d) => d.to_string(),
-        None => {
-            let (p, why) = libremodele::donor::choose(&av)?;
-            println!("donor (G22): {} ({why})", p.display());
-            p.to_string_lossy().into_owned()
-        }
-    };
-    let donor = load(&donor_path)?;
-    let c = convert::convert(
-        &av,
-        &donor,
-        &convert::Options {
-            name: name.to_string(),
-            height,
-            keep,
-            max_tris,
-            keep_polygons: rest.contains(&"--keep-polygons"),
-        },
-    )?;
-    let mut c = c;
-    let mut size_note = None;
-    if rest.contains(&"--sway") {
-        // D16: off by default; D15: UniVRM spring port within each sequence's budget.
-        let before = mdl::write(&c.model)?.len();
-        let t = std::time::Instant::now();
-        let sum = sway::apply(&mut c.model, &c.rig)?;
-        c.report.push(format!(
-            "sway (D15): {} chain bones in {} groups; {} sequences fully swaying, {} partly (budget), {} static; {:.1} s",
-            c.rig.chains.len(),
-            c.rig.groups.len(),
-            sum.full,
-            sum.partial,
-            sum.none,
-            t.elapsed().as_secs_f32()
-        ));
-        size_note = Some(before);
-    }
-    let bytes = mdl::write(&c.model)?;
-    if let Some(before) = size_note {
-        c.report.push(format!(
-            "sway: +{} bytes ({:.2} MB)",
-            bytes.len() - before,
-            (bytes.len() - before) as f64 / 1e6
-        ));
-    }
-
-    // G5 under A14: our own re-read must give back exactly what we built.
-    let again = mdl::read(&bytes).context("re-reading the written model")?;
-    if again != c.model {
-        bail!("the written model does not read back identically");
-    }
-
-    let game = out.join("goldsrc/models/player").join(name);
-    let review = out.join("review").join(name);
-    std::fs::create_dir_all(&game)?;
-    std::fs::create_dir_all(&review)?;
-    write(&game.join(format!("{name}.mdl")), &bytes)?;
-
-    let (sheet, labels) = preview::sheet(&c.model, (240, 300));
-    sheet.save(review.join("preview.png"))?;
-    let thumb = thumbnail(&c.model);
-    write(&game.join(format!("{name}.bmp")), &texture::bmp8(&thumb))?;
-    write(
-        &review.join("clean_manifest.json"),
-        serde_json::to_string_pretty(&c.manifest)?.as_bytes(),
-    )?;
-
-    let mut report = c.report;
-    report.push(format!(
-        "model: {} bytes, re-read identical (A14)",
-        bytes.len()
-    ));
-    report.extend(labels);
-    write(
-        &review.join("report.txt"),
-        (report.join("\n") + "\n").as_bytes(),
-    )?;
-    report.iter().for_each(|l| println!("{l}"));
+    let insp = pipeline::inspect(&req)?;
+    let mut built = pipeline::build(&insp, &req, &mut |_| {})?;
+    let (game, review) = pipeline::save(&mut built, &out)?;
+    built.report.iter().for_each(|l| println!("{l}"));
     println!("wrote {} and {}", game.display(), review.display());
     Ok(())
-}
-
-/// The 164×200 player-menu picture (D8): idle pose from the front.
-fn thumbnail(m: &mdl::Model) -> texture::Indexed {
-    let pose = m
-        .sequences
-        .iter()
-        .position(|s| s.label == "idle")
-        .map(|i| (i, 0));
-    let tris = preview::triangles(m, &preview::bone_worlds(m, pose));
-    let frame = preview::framing(&tris, preview::View::Front);
-    let img = preview::render(
-        m,
-        &tris,
-        preview::winding_sign(m),
-        preview::View::Front,
-        frame,
-        164,
-        200,
-        [24, 24, 28],
-    );
-    let px: Vec<[u8; 3]> = img.pixels().map(|p| p.0).collect();
-    texture::quantise(&px, 164, 200)
-}
-
-fn write(path: &Path, bytes: &[u8]) -> Result<()> {
-    std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
 }
 
 fn info(m: &mdl::Model) -> Result<()> {
